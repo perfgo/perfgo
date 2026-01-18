@@ -85,10 +85,12 @@ Each sample consists of:
 ## Features
 
 - **Full stack trace preservation**: Captures complete call chains, not just individual functions
+- **Sample merging**: Automatically merges samples with identical stacktraces to reduce profile size
+- **Full binary paths**: Preserves absolute paths to binaries for automatic symbolization by pprof
 - **Standard pprof format**: Output is compatible with all pprof tools
 - **Event labels**: Preserves event types (cycles, instructions, etc.) as sample labels
 - **Offset removal**: Function offsets (e.g., `+0x42`) are automatically stripped for cleaner output
-- **Binary mappings**: Tracks which binary/library each function belongs to
+- **Binary mappings**: Tracks which binary/library each function belongs to with full paths
 - **Address information**: Preserves memory addresses for detailed analysis
 - **Streaming parser**: Uses `io.Reader` for memory-efficient processing of large files
 

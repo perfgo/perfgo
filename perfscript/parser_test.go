@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/pprof/profile"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,9 +65,10 @@ perfgo.test.lin  223225 7187035.622644:         34 L1-dcache-load-misses:
 	require.Equal(t, "count", prof.SampleType[0].Unit)
 	require.Equal(t, "L1-dcache-load-misses", prof.SampleType[1].Type)
 	require.Equal(t, "count", prof.SampleType[1].Unit)
-	require.Len(t, prof.Sample, 2)
-	require.Equal(t, []int64{14, 0}, prof.Sample[0].Value)
-	require.Equal(t, []int64{0, 34}, prof.Sample[1].Value)
+	
+	// With merging, samples with identical stacks should be combined
+	require.Len(t, prof.Sample, 1, "Identical stacks should be merged into one sample")
+	require.Equal(t, []int64{14, 34}, prof.Sample[0].Value, "Merged sample should have both event counts")
 
 	// Check that all samples have locations
 	for i, sample := range prof.Sample {
@@ -91,10 +93,10 @@ perfgo.test.lin  223225 7187035.622644:         34 L1-dcache-load-misses:
 	}
 	require.True(t, foundDoInit1)
 
-	// Check that mappings were created
+	// Check that mappings were created with full paths
 	require.Len(t, prof.Mapping, 2)
 	require.Equal(t, "[kernel.kallsyms]", prof.Mapping[0].File)
-	require.Equal(t, "perfgo.test.linux.amd64", prof.Mapping[1].File)
+	require.Equal(t, "/root/.cache/perfgo/repositories/pyroscope-5005b7d6/worktree/perfgo.test.linux.amd64", prof.Mapping[1].File)
 
 	require.NoError(t, prof.CheckValid())
 }
@@ -113,4 +115,113 @@ func TestParser_ParseEmpty(t *testing.T) {
 	if len(prof.Function) != 0 {
 		t.Errorf("Expected 0 functions, got %d", len(prof.Function))
 	}
+}
+
+func TestParser_MergeDuplicateStacks(t *testing.T) {
+	// Test that samples with identical stacktraces are merged
+	output := `program 12345 [000] 123.456789:          1 cycles:u:
+	ffffffffa1234567 function_a+0x10 (/path/to/binary)
+	ffffffffa2345678 function_b+0x20 (/path/to/binary)
+
+program 12345 [000] 123.456790:          1 cycles:u:
+	ffffffffa1234567 function_a+0x10 (/path/to/binary)
+	ffffffffa2345678 function_b+0x20 (/path/to/binary)
+
+program 12345 [000] 123.456791:          1 cycles:u:
+	ffffffffa9999999 function_c+0x30 (/path/to/binary)
+`
+
+	parser := New()
+	prof, err := parser.Parse(strings.NewReader(output))
+	require.NoError(t, err)
+
+	// Should have only 2 unique samples (first two have same stack)
+	require.Len(t, prof.Sample, 2, "Expected 2 unique samples after merging duplicates")
+
+	// Find the merged sample
+	var mergedSample *profile.Sample
+	for _, sample := range prof.Sample {
+		if len(sample.Location) == 2 {
+			if sample.Location[0].Line[0].Function.Name == "function_a" {
+				mergedSample = sample
+				break
+			}
+		}
+	}
+
+	require.NotNil(t, mergedSample, "Should find the merged sample")
+	// The merged sample should have count = 2 (1+1 from the two identical stacks)
+	require.Equal(t, int64(2), mergedSample.Value[0], "Merged sample should have combined count")
+}
+
+func TestParser_MergeDifferentEvents(t *testing.T) {
+	// Test that samples with same stack but different events are merged correctly
+	output := `program 12345 [000] 123.456789: 100 cycles:u:
+	ffffffffa1234567 function_a+0x10 (/path/to/binary)
+
+program 12345 [000] 123.456790: 50 instructions:u:
+	ffffffffa1234567 function_a+0x10 (/path/to/binary)
+
+program 12345 [000] 123.456791: 75 cycles:u:
+	ffffffffa1234567 function_a+0x10 (/path/to/binary)
+`
+
+	parser := New()
+	prof, err := parser.Parse(strings.NewReader(output))
+	require.NoError(t, err)
+
+	// Should have 1 sample with both event types
+	require.Len(t, prof.Sample, 1, "Expected 1 sample")
+	require.Len(t, prof.SampleType, 2, "Expected 2 event types")
+
+	sample := prof.Sample[0]
+	require.Len(t, sample.Value, 2, "Sample should have 2 values")
+
+	// Verify the values are summed correctly
+	// cycles:u should be 100 + 75 = 175
+	// instructions:u should be 50
+	cyclesIdx := -1
+	instructionsIdx := -1
+	for i, st := range prof.SampleType {
+		if st.Type == "cycles:u" {
+			cyclesIdx = i
+		} else if st.Type == "instructions:u" {
+			instructionsIdx = i
+		}
+	}
+
+	require.NotEqual(t, -1, cyclesIdx, "Should find cycles:u")
+	require.NotEqual(t, -1, instructionsIdx, "Should find instructions:u")
+	require.Equal(t, int64(175), sample.Value[cyclesIdx], "cycles:u should be summed")
+	require.Equal(t, int64(50), sample.Value[instructionsIdx], "instructions:u should be correct")
+}
+
+func TestParser_PreserveFullPaths(t *testing.T) {
+	// Test that full binary paths are preserved for pprof symbolization
+	output := `program 12345 [000] 123.456789:          1 cycles:u:
+	ffffffffa1234567 function_a+0x10 (/usr/local/bin/myapp)
+	ffffffffa2345678 function_b+0x20 (/home/user/code/project/binary)
+	ffffffffa3456789 kernel_func+0x30 ([kernel.kallsyms])
+`
+
+	parser := New()
+	prof, err := parser.Parse(strings.NewReader(output))
+	require.NoError(t, err)
+
+	// Should have 3 mappings with full paths
+	require.Len(t, prof.Mapping, 3, "Expected 3 mappings")
+
+	// Verify full paths are preserved
+	mappingFiles := make(map[string]bool)
+	for _, m := range prof.Mapping {
+		mappingFiles[m.File] = true
+	}
+
+	require.True(t, mappingFiles["/usr/local/bin/myapp"], "Should preserve full path to myapp")
+	require.True(t, mappingFiles["/home/user/code/project/binary"], "Should preserve full path to binary")
+	require.True(t, mappingFiles["[kernel.kallsyms]"], "Should preserve kernel mapping")
+
+	// Ensure no paths were stripped to basename
+	require.False(t, mappingFiles["myapp"], "Should not strip path to basename")
+	require.False(t, mappingFiles["binary"], "Should not strip path to basename")
 }

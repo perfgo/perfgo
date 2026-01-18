@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -140,7 +139,8 @@ func (p *Parser) parseStackFrame(line string) *profile.Location {
 	// Get or create mapping
 	var mapping *profile.Mapping
 	if binaryPath != "" {
-		mapping = p.getOrCreateMapping(filepath.Base(binaryPath))
+		// Use full path so pprof can find the binary for symbolization
+		mapping = p.getOrCreateMapping(binaryPath)
 	}
 
 	// Get or create function
@@ -203,7 +203,7 @@ func (p *Parser) addSample(stack []*profile.Location, eventType string, count in
 		return
 	}
 
-	// check if the sample already exists
+	// check if the sample type already exists
 	sampleIdx := -1
 	for idx := range p.profile.SampleType {
 		typeValue := p.profile.SampleType[idx]
@@ -221,7 +221,16 @@ func (p *Parser) addSample(stack []*profile.Location, eventType string, count in
 		}
 	}
 
-	// Create sample
+	// Check if a sample with this exact stack already exists
+	for _, existingSample := range p.profile.Sample {
+		if stacksEqual(existingSample.Location, stack) {
+			// Merge with existing sample
+			existingSample.Value[sampleIdx] += count
+			return
+		}
+	}
+
+	// Create new sample
 	sample := &profile.Sample{
 		Location: stack,
 		Value:    make([]int64, len(p.profile.SampleType)),
@@ -229,4 +238,17 @@ func (p *Parser) addSample(stack []*profile.Location, eventType string, count in
 	sample.Value[sampleIdx] = count
 
 	p.profile.Sample = append(p.profile.Sample, sample)
+}
+
+// stacksEqual returns true if two stacks have the same location IDs
+func stacksEqual(a, b []*profile.Location) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID {
+			return false
+		}
+	}
+	return true
 }

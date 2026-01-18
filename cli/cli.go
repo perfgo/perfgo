@@ -2,16 +2,23 @@ package cli
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/google/pprof/profile"
+	"github.com/perfgo/perfgo/model"
 	"github.com/perfgo/perfgo/perfscript"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -43,9 +50,68 @@ func New() *App {
 		},
 	}
 	app.cli.Commands = append(app.cli.Commands, &cli.Command{
-		Name:   "test",
-		Usage:  "Run a go tests",
-		Action: app.test,
+		Name:  "test",
+		Usage: "Run Go tests with optional perf integration",
+		Subcommands: []*cli.Command{
+			{
+				Name:   "default",
+				Usage:  "Run tests without perf (default behavior)",
+				Action: app.testDefault,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "remote-host",
+						Usage: "SSH host to run tests on (will auto-detect OS and architecture)",
+					},
+					&cli.BoolFlag{
+						Name:  "keep",
+						Usage: "Keep remote artifacts (don't clean up after test execution)",
+					},
+				},
+			},
+			{
+				Name:   "stat",
+				Usage:  "Run tests with perf stat",
+				Action: app.testStat,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "remote-host",
+						Usage: "SSH host to run tests on (will auto-detect OS and architecture)",
+					},
+					&cli.BoolFlag{
+						Name:  "keep",
+						Usage: "Keep remote artifacts (don't clean up after test execution)",
+					},
+					&cli.StringSliceFlag{
+						Name:    "event",
+						Aliases: []string{"e"},
+						Usage:   "Event to measure (can be specified multiple times)",
+					},
+				},
+			},
+			{
+				Name:   "profile",
+				Usage:  "Run tests with perf record and generate pprof profile",
+				Action: app.testProfile,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "remote-host",
+						Usage: "SSH host to run tests on (will auto-detect OS and architecture)",
+					},
+					&cli.BoolFlag{
+						Name:  "keep",
+						Usage: "Keep remote artifacts (don't clean up after test execution)",
+					},
+					&cli.StringFlag{
+						Name:    "event",
+						Aliases: []string{"e"},
+						Usage:   "Event to record (default: cycles:u)",
+						Value:   "cycles:u",
+					},
+				},
+			},
+		},
+		// Default action when no subcommand is specified
+		Action: app.testDefault,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "remote-host",
@@ -55,10 +121,23 @@ func New() *App {
 				Name:  "keep",
 				Usage: "Keep remote artifacts (don't clean up after test execution)",
 			},
+		},
+	})
+	app.cli.Commands = append(app.cli.Commands, &cli.Command{
+		Name:   "list",
+		Usage:  "List previous test runs",
+		Action: app.list,
+		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:    "event",
-				Aliases: []string{"e"},
-				Usage:   "Wrap test execution with perf record -e <event>",
+				Name:    "path",
+				Aliases: []string{"p"},
+				Usage:   "Filter by relative path (e.g., examples/false-sharing)",
+			},
+			&cli.IntFlag{
+				Name:    "limit",
+				Aliases: []string{"n"},
+				Usage:   "Limit number of results (default: 20)",
+				Value:   20,
 			},
 		},
 	})
@@ -69,13 +148,90 @@ func (a *App) Run(args []string) error {
 	return a.cli.Run(args)
 }
 
-func (a *App) test(ctx *cli.Context) error {
+func (a *App) testDefault(ctx *cli.Context) error {
+	return a.runTest(ctx, "")
+}
+
+func (a *App) testStat(ctx *cli.Context) error {
+	return a.runTest(ctx, "stat")
+}
+
+func (a *App) testProfile(ctx *cli.Context) error {
+	return a.runTest(ctx, "profile")
+}
+
+func (a *App) runTest(ctx *cli.Context, perfMode string) error {
+	startTime := time.Now()
+	
 	remoteHost := ctx.String("remote-host")
 	keepArtifacts := ctx.Bool("keep")
-	perfEvent := ctx.String("event")
+	
+	var perfEvent string
+	var perfEvents []string
+	
+	if perfMode == "profile" {
+		perfEvent = ctx.String("event")
+	} else if perfMode == "stat" {
+		perfEvents = ctx.StringSlice("event")
+	}
 
 	// Get additional arguments passed after flags (or after --)
 	testArgs := ctx.Args().Slice()
+	
+	// Generate random 16-byte ID
+	idBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err != nil {
+		return fmt.Errorf("failed to generate test run ID: %w", err)
+	}
+	runID := hex.EncodeToString(idBytes)
+	
+	// Prepare test run recording
+	testRun := &model.TestRun{
+		ID:        runID,
+		Timestamp: startTime,
+		Args:      os.Args,
+	}
+	
+	// Track test binary path for artifact saving
+	var testBinaryPath string
+	
+	// Capture working directory
+	if cwd, err := os.Getwd(); err == nil {
+		testRun.WorkDir = cwd
+	}
+	
+	// Capture git info (non-fatal if it fails)
+	if commit, branch, err := a.getGitInfo(); err == nil {
+		testRun.Commit = commit
+		testRun.Branch = branch
+	}
+	
+	// Track final exit code
+	var finalErr error
+	defer func() {
+		testRun.Duration = time.Since(startTime)
+		if finalErr != nil {
+			if exitErr, ok := finalErr.(*exec.ExitError); ok {
+				testRun.ExitCode = exitErr.ExitCode()
+			} else {
+				testRun.ExitCode = 1
+			}
+		} else {
+			testRun.ExitCode = 0
+		}
+		
+		// Record the test run (non-fatal if it fails)
+		if err := a.recordTestRun(testRun, testBinaryPath); err != nil {
+			a.logger.Warn().Err(err).Msg("Failed to record test run")
+		}
+		
+		// Clean up test binary after recording
+		if testBinaryPath != "" {
+			if err := os.Remove(testBinaryPath); err != nil {
+				a.logger.Debug().Err(err).Str("binary", testBinaryPath).Msg("Failed to clean up test binary")
+			}
+		}
+	}()
 
 	if len(testArgs) > 0 {
 		a.logger.Debug().Strs("args", testArgs).Msg("Additional test arguments")
@@ -93,6 +249,9 @@ func (a *App) test(ctx *cli.Context) error {
 
 	if remoteHost != "" {
 		a.logger.Info().Str("host", remoteHost).Msg("Connecting to remote host")
+		
+		// Store remote host information
+		testRun.RemoteHost = remoteHost
 
 		// Setup SSH multiplexing for all remote operations
 		controlPath, err := a.setupSSHMultiplexing(remoteHost)
@@ -107,6 +266,10 @@ func (a *App) test(ctx *cli.Context) error {
 			a.logger.Error().Err(err).Msg("Failed to detect remote system")
 			return err
 		}
+		
+		// Store OS and architecture information
+		testRun.OS = remoteOS
+		testRun.Arch = remoteArch
 
 		a.logger.Info().
 			Str("os", remoteOS).
@@ -119,11 +282,7 @@ func (a *App) test(ctx *cli.Context) error {
 			a.logger.Error().Err(err).Msg("Failed to build test binary")
 			return err
 		}
-		defer func() {
-			if err := os.Remove(testBinary); err != nil {
-				a.logger.Warn().Err(err).Str("binary", testBinary).Msg("Failed to clean up test binary")
-			}
-		}()
+		testBinaryPath = testBinary
 
 		a.logger.Info().Str("binary", testBinary).Msg("Test binary built successfully")
 
@@ -188,32 +347,51 @@ func (a *App) test(ctx *cli.Context) error {
 		// Transform runtime args to use -test. prefix
 		transformedArgs := a.transformTestFlags(runtimeArgs)
 
-		if err := a.executeRemoteTestInDir(remoteHost, controlPath, remotePath, remoteDir, remoteBaseDir, packagePath, perfEvent, transformedArgs); err != nil {
-			a.logger.Error().Err(err).Msg("Remote test execution failed")
-			return err
-		}
+		if perfMode == "profile" {
+			err := a.executeRemoteTestInDir(remoteHost, controlPath, remotePath, remoteDir, remoteBaseDir, packagePath, "profile", perfEvent, transformedArgs, testRun)
+			if err != nil {
+				a.logger.Error().Err(err).Msg("Remote test execution failed")
+				finalErr = err
+				return err
+			}
 
-		// Copy back and process perf.data if perf was used
-		if perfEvent != "" {
+			// Copy back and process perf.data
 			if err := a.processPerfData(remoteHost, controlPath, remoteBaseDir); err != nil {
 				a.logger.Error().Err(err).Msg("Failed to process performance data")
+				finalErr = err
+				return err
+			}
+
+			// Note: artifacts will be saved after recordTestRun creates the directory
+		} else if perfMode == "stat" {
+			err := a.executeRemoteTestInDir(remoteHost, controlPath, remotePath, remoteDir, remoteBaseDir, packagePath, "stat", strings.Join(perfEvents, ","), transformedArgs, testRun)
+			if err != nil {
+				a.logger.Error().Err(err).Msg("Remote test execution failed")
+				finalErr = err
+				return err
+			}
+		} else {
+			err := a.executeRemoteTestInDir(remoteHost, controlPath, remotePath, remoteDir, remoteBaseDir, packagePath, "", "", transformedArgs, testRun)
+			if err != nil {
+				a.logger.Error().Err(err).Msg("Remote test execution failed")
+				finalErr = err
 				return err
 			}
 		}
 	} else {
 		// Local test execution
 		a.logger.Info().Msg("Running tests locally")
+		
+		// Capture local OS and architecture
+		testRun.OS = runtime.GOOS
+		testRun.Arch = runtime.GOARCH
 
 		testBinary, err := a.buildTestBinary("", "", buildArgs)
 		if err != nil {
 			a.logger.Error().Err(err).Msg("Failed to build test binary")
 			return err
 		}
-		defer func() {
-			if err := os.Remove(testBinary); err != nil {
-				a.logger.Warn().Err(err).Str("binary", testBinary).Msg("Failed to clean up test binary")
-			}
-		}()
+		testBinaryPath = testBinary
 
 		a.logger.Info().Str("binary", testBinary).Msg("Test binary built successfully")
 
@@ -223,15 +401,34 @@ func (a *App) test(ctx *cli.Context) error {
 		// Transform runtime args to use -test. prefix for local execution too
 		transformedArgs := a.transformTestFlags(runtimeArgs)
 
-		if err := a.executeLocalTest(testBinary, perfEvent, transformedArgs); err != nil {
-			a.logger.Error().Err(err).Msg("Local test execution failed")
-			return err
-		}
+		if perfMode == "profile" {
+			err := a.executeLocalTest(testBinary, "profile", perfEvent, transformedArgs, testRun)
+			if err != nil {
+				a.logger.Error().Err(err).Msg("Local test execution failed")
+				finalErr = err
+				return err
+			}
 
-		// Process perf.data if perf was used
-		if perfEvent != "" {
+			// Process perf.data
 			if err := a.convertPerfToPprof("perf.data"); err != nil {
 				a.logger.Error().Err(err).Msg("Failed to convert performance data to pprof")
+				finalErr = err
+				return err
+			}
+
+			// Note: artifacts will be saved after recordTestRun creates the directory
+		} else if perfMode == "stat" {
+			err := a.executeLocalTest(testBinary, "stat", strings.Join(perfEvents, ","), transformedArgs, testRun)
+			if err != nil {
+				a.logger.Error().Err(err).Msg("Local test execution failed")
+				finalErr = err
+				return err
+			}
+		} else {
+			err := a.executeLocalTest(testBinary, "", "", transformedArgs, testRun)
+			if err != nil {
+				a.logger.Error().Err(err).Msg("Local test execution failed")
+				finalErr = err
 				return err
 			}
 		}
@@ -321,6 +518,160 @@ func (a *App) parsePerfScript(scriptOutput io.Reader) error {
 	a.logger.Info().Msgf("View profile with: go tool pprof %s", profileFile)
 
 	return nil
+}
+
+func (a *App) getGitInfo() (commit, branch string, err error) {
+	// Get current commit hash
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get git commit: %w", err)
+	}
+	commit = strings.TrimSpace(string(output))
+
+	// Get current branch
+	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	output, err = cmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get git branch: %w", err)
+	}
+	branch = strings.TrimSpace(string(output))
+
+	return commit, branch, nil
+}
+
+func (a *App) saveArtifacts(runDir string, testRun *model.TestRun, testBinaryPath string) error {
+	cwd, _ := os.Getwd()
+	
+	// Save the test binary if provided
+	if testBinaryPath != "" {
+		if info, err := os.Stat(testBinaryPath); err == nil && !info.IsDir() {
+			destBinary := filepath.Join(runDir, filepath.Base(testBinaryPath))
+			if err := a.copyFile(testBinaryPath, destBinary); err != nil {
+				a.logger.Warn().Err(err).Str("file", testBinaryPath).Msg("Failed to copy test binary")
+			} else {
+				testRun.Artifacts = append(testRun.Artifacts, model.Artifact{
+					Type: model.ArtifactTypeTestBinary,
+					Size: uint64(info.Size()),
+					File: filepath.Base(testBinaryPath),
+				})
+				a.logger.Debug().Str("dest", destBinary).Msg("Saved test binary")
+			}
+		}
+	}
+	
+	// Save perf.pb.gz profile if it exists
+	profileFile := filepath.Join(cwd, "perf.pb.gz")
+	if info, err := os.Stat(profileFile); err == nil {
+		destProfile := filepath.Join(runDir, "perf.pb.gz")
+		
+		// Find the test binary to rewrite paths
+		var destBinary string
+		for _, artifact := range testRun.Artifacts {
+			if artifact.Type == model.ArtifactTypeTestBinary {
+				destBinary = filepath.Join(runDir, artifact.File)
+				break
+			}
+		}
+		
+		if destBinary != "" {
+			// Rewrite profile paths to point to saved binary
+			if err := a.rewriteProfilePaths(profileFile, runDir, destBinary); err != nil {
+				a.logger.Warn().Err(err).Msg("Failed to rewrite profile paths, copying original")
+				// Fall back to copying original
+				if err := a.copyFile(profileFile, destProfile); err != nil {
+					return fmt.Errorf("failed to copy profile: %w", err)
+				}
+			}
+		} else {
+			// No binary found, just copy the profile
+			if err := a.copyFile(profileFile, destProfile); err != nil {
+				return fmt.Errorf("failed to copy profile: %w", err)
+			}
+		}
+		
+		testRun.Artifacts = append(testRun.Artifacts, model.Artifact{
+			Type: model.ArtifactTypePprofProfile,
+			Size: uint64(info.Size()),
+			File: "perf.pb.gz",
+		})
+		a.logger.Debug().Str("dest", destProfile).Msg("Saved pprof profile")
+	}
+	
+	return nil
+}
+
+func (a *App) rewriteProfilePaths(profileFile, runDir, destBinary string) error {
+	// Read the profile
+	f, err := os.Open(profileFile)
+	if err != nil {
+		return fmt.Errorf("failed to open profile: %w", err)
+	}
+	defer f.Close()
+
+	prof, err := profile.Parse(f)
+	if err != nil {
+		return fmt.Errorf("failed to parse profile: %w", err)
+	}
+
+	// Update all mappings to point to archived binary
+	testBinaryBasename := filepath.Base(destBinary)
+	for _, mapping := range prof.Mapping {
+		// Skip kernel mappings
+		if strings.HasPrefix(mapping.File, "[") {
+			continue
+		}
+		
+		// Check if this mapping is for the test binary
+		mappingBasename := filepath.Base(mapping.File)
+		if mappingBasename == testBinaryBasename {
+			// Update to use archived path
+			mapping.File = destBinary
+			a.logger.Debug().
+				Str("old", mapping.File).
+				Str("new", destBinary).
+				Msg("Updated mapping path")
+		}
+	}
+
+	// Write updated profile
+	destProfile := filepath.Join(runDir, "perf.pb.gz")
+	outFile, err := os.Create(destProfile)
+	if err != nil {
+		return fmt.Errorf("failed to create output profile: %w", err)
+	}
+	defer outFile.Close()
+
+	if err := prof.Write(outFile); err != nil {
+		return fmt.Errorf("failed to write updated profile: %w", err)
+	}
+
+	return nil
+}
+
+func (a *App) copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	if _, err := io.Copy(destFile, sourceFile); err != nil {
+		return err
+	}
+
+	// Copy file permissions
+	sourceInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(dst, sourceInfo.Mode())
 }
 
 func (a *App) getRemoteRepositoryDir(host, controlPath string) (string, error) {
@@ -606,35 +957,59 @@ func (a *App) buildTestBinary(goos, goarch string, extraArgs []string) (string, 
 	return binaryName, nil
 }
 
-func (a *App) executeLocalTest(binaryPath, perfEvent string, args []string) error {
+func (a *App) executeLocalTest(binaryPath, perfMode, perfEvent string, args []string, testRun *model.TestRun) error {
 	a.logger.Debug().
 		Str("binary", binaryPath).
+		Str("perfMode", perfMode).
 		Str("perfEvent", perfEvent).
 		Strs("args", args).
 		Msg("Starting local test execution")
 
 	var cmd *exec.Cmd
 
-	// Wrap with perf if event is specified
-	if perfEvent != "" {
-		// Build perf command: perf record -e <event> -o perf.data -- <binary> <args>
-		perfArgs := []string{"record", "-e", perfEvent, "-o", "perf.data", "--", binaryPath}
+	if perfMode == "profile" {
+		// Build perf command: perf record -g --call-graph fp -e <event> -o perf.data -- <binary> <args>
+		perfArgs := []string{"record", "-g", "--call-graph", "fp", "-e", perfEvent, "-o", "perf.data", "--", binaryPath}
 		perfArgs = append(perfArgs, args...)
 		cmd = exec.Command("perf", perfArgs...)
 
 		a.logger.Info().
 			Str("event", perfEvent).
-			Msg("Wrapping test execution with perf")
+			Msg("Wrapping test execution with perf record")
+	} else if perfMode == "stat" {
+		// Build perf command: perf stat -e <events> -- <binary> <args>
+		perfArgs := []string{"stat"}
+		if perfEvent != "" {
+			// Split comma-separated events
+			events := strings.Split(perfEvent, ",")
+			for _, event := range events {
+				perfArgs = append(perfArgs, "-e", strings.TrimSpace(event))
+			}
+		}
+		perfArgs = append(perfArgs, "--", binaryPath)
+		perfArgs = append(perfArgs, args...)
+		cmd = exec.Command("perf", perfArgs...)
+
+		a.logger.Info().
+			Str("events", perfEvent).
+			Msg("Wrapping test execution with perf stat")
 	} else {
 		// Execute the test binary directly with arguments
 		cmd = exec.Command(binaryPath, args...)
 	}
 
-	// Connect stdout and stderr to display test output in real-time
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Capture stdout and stderr for history
+	var stdoutBuf, stderrBuf bytes.Buffer
+	
+	// Create multi-writers to both capture and display output
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
 	if err := cmd.Run(); err != nil {
+		// Save captured output to testRun
+		testRun.StdoutFile = stdoutBuf.String()
+		testRun.StderrFile = stderrBuf.String()
+		
 		// Test failures are expected to return non-zero exit codes
 		// Check if it's an ExitError (test failed) vs other errors
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -646,7 +1021,11 @@ func (a *App) executeLocalTest(binaryPath, perfEvent string, args []string) erro
 		return fmt.Errorf("failed to execute test: %w", err)
 	}
 
-	if perfEvent != "" {
+	// Save captured output to testRun
+	testRun.StdoutFile = stdoutBuf.String()
+	testRun.StderrFile = stderrBuf.String()
+
+	if perfMode == "profile" {
 		a.logger.Info().Str("output", "perf.data").Msg("Performance data collected")
 	}
 
@@ -735,7 +1114,7 @@ func (a *App) syncDirectoryToRemote(host, controlPath, remoteBaseDir string) (st
 	return remoteDir, nil
 }
 
-func (a *App) executeRemoteTestInDir(host, controlPath, remotePath, remoteDir, remoteBaseDir, packagePath, perfEvent string, args []string) error {
+func (a *App) executeRemoteTestInDir(host, controlPath, remotePath, remoteDir, remoteBaseDir, packagePath, perfMode, perfEvent string, args []string, testRun *model.TestRun) error {
 	// Construct the full working directory path
 	workDir := remoteDir
 	if packagePath != "." && packagePath != "" {
@@ -748,14 +1127,14 @@ func (a *App) executeRemoteTestInDir(host, controlPath, remotePath, remoteDir, r
 		Str("sync_dir", remoteDir).
 		Str("work_dir", workDir).
 		Str("package", packagePath).
+		Str("perfMode", perfMode).
 		Str("perfEvent", perfEvent).
 		Strs("args", args).
 		Msg("Starting remote test execution")
 
 	var remoteCmd string
 
-	// Build the remote command with arguments
-	if perfEvent != "" {
+	if perfMode == "profile" {
 		// Wrap with perf record
 		perfDataPath := fmt.Sprintf("%s/perf.data", remoteBaseDir)
 		remoteCmd = fmt.Sprintf("cd %s && perf record -g --call-graph fp -e %s -o %s -- %s",
@@ -764,7 +1143,22 @@ func (a *App) executeRemoteTestInDir(host, controlPath, remotePath, remoteDir, r
 		a.logger.Info().
 			Str("event", perfEvent).
 			Str("output", perfDataPath).
-			Msg("Wrapping remote test execution with perf")
+			Msg("Wrapping remote test execution with perf record")
+	} else if perfMode == "stat" {
+		// Wrap with perf stat
+		remoteCmd = fmt.Sprintf("cd %s && perf stat", workDir)
+		if perfEvent != "" {
+			// Split comma-separated events
+			events := strings.Split(perfEvent, ",")
+			for _, event := range events {
+				remoteCmd += fmt.Sprintf(" -e %s", strings.TrimSpace(event))
+			}
+		}
+		remoteCmd += fmt.Sprintf(" -- %s", remotePath)
+
+		a.logger.Info().
+			Str("events", perfEvent).
+			Msg("Wrapping remote test execution with perf stat")
 	} else {
 		// Direct execution without perf
 		remoteCmd = fmt.Sprintf("cd %s && %s", workDir, remotePath)
@@ -787,11 +1181,18 @@ func (a *App) executeRemoteTestInDir(host, controlPath, remotePath, remoteDir, r
 		remoteCmd,
 	)
 
-	// Connect stdout and stderr to display test output in real-time
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Capture stdout and stderr for history
+	var stdoutBuf, stderrBuf bytes.Buffer
+	
+	// Create multi-writers to both capture and display output
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
 	if err := cmd.Run(); err != nil {
+		// Save captured output to testRun
+		testRun.StdoutFile = stdoutBuf.String()
+		testRun.StderrFile = stderrBuf.String()
+		
 		// Test failures are expected to return non-zero exit codes
 		// Check if it's an ExitError (test failed) vs other errors
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -803,7 +1204,11 @@ func (a *App) executeRemoteTestInDir(host, controlPath, remotePath, remoteDir, r
 		return fmt.Errorf("failed to execute remote test: %w", err)
 	}
 
-	if perfEvent != "" {
+	// Save captured output to testRun
+	testRun.StdoutFile = stdoutBuf.String()
+	testRun.StderrFile = stderrBuf.String()
+
+	if perfMode == "profile" {
 		perfDataPath := fmt.Sprintf("%s/perf.data", remoteBaseDir)
 		a.logger.Info().
 			Str("output", perfDataPath).
@@ -1017,4 +1422,256 @@ func (a *App) runRemoteCommand(host, controlPath, command string) (string, error
 	}
 
 	return stdout.String(), nil
+}
+
+type testRunEntry struct {
+	testRun  model.TestRun
+	fullPath string
+}
+
+func (a *App) list(ctx *cli.Context) error {
+	filterPath := ctx.String("path")
+	limit := ctx.Int("limit")
+
+	// Get git repository root
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("not in a git repository: %w", err)
+	}
+	repoRoot := strings.TrimSpace(string(output))
+
+	perfgoRoot := filepath.Join(repoRoot, ".perfgo")
+
+	// Check if .perfgo directory exists
+	if _, err := os.Stat(perfgoRoot); os.IsNotExist(err) {
+		fmt.Println("No test runs found")
+		fmt.Printf("Test runs are saved to %s/history/<timestamp>-<commit>-<id>/\n", perfgoRoot)
+		return nil
+	}
+
+	// Collect test runs
+	var testRunEntries []testRunEntry
+	err = filepath.WalkDir(perfgoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if d.IsDir() {
+			testRunPath := filepath.Join(path, "testrun.json")
+			if _, err := os.Stat(testRunPath); err == nil {
+				testRun, err := a.parseTestRunJSON(testRunPath)
+				if err != nil {
+					a.logger.Warn().Err(err).Str("path", testRunPath).Msg("Failed to parse testrun.json")
+					return nil
+				}
+
+				entry := testRunEntry{
+					testRun:  testRun,
+					fullPath: path,
+				}
+
+				// Apply path filter if specified
+				if filterPath == "" || strings.Contains(testRun.WorkDir, filterPath) {
+					testRunEntries = append(testRunEntries, entry)
+				}
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to walk .perfgo directory: %w", err)
+	}
+
+	if len(testRunEntries) == 0 {
+		if filterPath != "" {
+			fmt.Printf("No test runs found matching path: %s\n", filterPath)
+		} else {
+			fmt.Println("No test runs found")
+		}
+		return nil
+	}
+
+	// Sort by timestamp (newest first)
+	sort.Slice(testRunEntries, func(i, j int) bool {
+		return testRunEntries[i].testRun.Timestamp.After(testRunEntries[j].testRun.Timestamp)
+	})
+
+	// Apply limit
+	displayRuns := testRunEntries
+	if limit > 0 && limit < len(displayRuns) {
+		displayRuns = displayRuns[:limit]
+	}
+
+	fmt.Printf("\n=== Test Runs (%d total) ===\n\n", len(testRunEntries))
+
+	for _, entry := range displayRuns {
+		tr := entry.testRun
+		timestamp := tr.Timestamp.Format("2006-01-02 15:04:05")
+
+		// Format duration
+		duration := tr.Duration.Round(time.Millisecond)
+
+		// Determine status indicator
+		status := "✓"
+		if tr.ExitCode != 0 {
+			status = "✗"
+		}
+
+		// Format args (skip the program name)
+		args := ""
+		if len(tr.Args) > 1 {
+			args = strings.Join(tr.Args[1:], " ")
+		}
+
+		// Show short ID (first 8 chars)
+		shortID := tr.ID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+
+		fmt.Printf("%s  %s  [%s]  exit=%d  id=%s\n", status, timestamp, duration, tr.ExitCode, shortID)
+		if args != "" {
+			fmt.Printf("   Args: %s\n", args)
+		}
+		if tr.WorkDir != "" {
+			fmt.Printf("   Path: %s\n", tr.WorkDir)
+		}
+		if tr.RemoteHost != "" {
+			fmt.Printf("   Remote: %s", tr.RemoteHost)
+			if tr.OS != "" && tr.Arch != "" {
+				fmt.Printf(" (%s/%s)", tr.OS, tr.Arch)
+			}
+			fmt.Println()
+		} else if tr.OS != "" && tr.Arch != "" {
+			fmt.Printf("   Local: %s/%s\n", tr.OS, tr.Arch)
+		}
+		if tr.Commit != "" {
+			shortCommit := tr.Commit
+			if len(shortCommit) > 8 {
+				shortCommit = shortCommit[:8]
+			}
+			fmt.Printf("   Commit: %s", shortCommit)
+			if tr.Branch != "" {
+				fmt.Printf(" (%s)", tr.Branch)
+			}
+			fmt.Println()
+		}
+		if len(tr.Artifacts) > 0 {
+			for _, artifact := range tr.Artifacts {
+				var typeName string
+				switch artifact.Type {
+				case model.ArtifactTypePprofProfile:
+					typeName = "profile"
+				case model.ArtifactTypeTestBinary:
+					typeName = "binary"
+				}
+				fmt.Printf("   %s: %s (%.1f KB)\n", typeName, artifact.File, float64(artifact.Size)/1024)
+			}
+		}
+		fmt.Printf("   %s\n", entry.fullPath)
+		fmt.Println()
+	}
+
+	fmt.Println("\nView test output: cat <path>/stdout.txt")
+	fmt.Println("View profile: go tool pprof <path>/perf.pb.gz")
+
+	return nil
+}
+
+func (a *App) parseTestRunJSON(testRunPath string) (model.TestRun, error) {
+	data, err := os.ReadFile(testRunPath)
+	if err != nil {
+		return model.TestRun{}, err
+	}
+
+	var testRun model.TestRun
+	if err := json.Unmarshal(data, &testRun); err != nil {
+		return model.TestRun{}, err
+	}
+
+	return testRun, nil
+}
+
+func (a *App) recordTestRun(testRun *model.TestRun, testBinaryPath string) error {
+	// Get repository root
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("not in a git repository: %w", err)
+	}
+	repoRoot := strings.TrimSpace(string(output))
+	repoName := filepath.Base(repoRoot)
+	
+	// Store repo name in testRun
+	testRun.Repo = repoName
+
+	// Get relative path from repo root
+	relPath := "."
+	if testRun.WorkDir != "" {
+		if rel, err := filepath.Rel(repoRoot, testRun.WorkDir); err == nil {
+			relPath = rel
+		}
+	}
+	
+	// Update WorkDir to be relative to repo root
+	testRun.WorkDir = relPath
+
+	// Create directory in .perfgo/history/<timestamp>-<commit>-<id>
+	timestamp := testRun.Timestamp.Format("20060102-150405")
+	shortCommit := testRun.Commit
+	if len(shortCommit) > 8 {
+		shortCommit = shortCommit[:8]
+	}
+	shortID := testRun.ID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	
+	runName := fmt.Sprintf("%s-%s-%s", timestamp, shortCommit, shortID)
+	runDir := filepath.Join(repoRoot, ".perfgo", "history", runName)
+
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		return fmt.Errorf("failed to create run directory: %w", err)
+	}
+
+	// Write stdout to file if present
+	if testRun.StdoutFile != "" {
+		stdoutPath := filepath.Join(runDir, "stdout.txt")
+		if err := os.WriteFile(stdoutPath, []byte(testRun.StdoutFile), 0644); err != nil {
+			return fmt.Errorf("failed to write stdout: %w", err)
+		}
+		testRun.StdoutFile = "stdout.txt" // Store relative filename
+	}
+
+	// Write stderr to file if present
+	if testRun.StderrFile != "" {
+		stderrPath := filepath.Join(runDir, "stderr.txt")
+		if err := os.WriteFile(stderrPath, []byte(testRun.StderrFile), 0644); err != nil {
+			return fmt.Errorf("failed to write stderr: %w", err)
+		}
+		testRun.StderrFile = "stderr.txt" // Store relative filename
+	}
+
+	// Archive artifacts if they exist
+	if err := a.saveArtifacts(runDir, testRun, testBinaryPath); err != nil {
+		a.logger.Warn().Err(err).Msg("Failed to save some artifacts")
+		// Don't fail the test run on artifact errors
+	}
+
+	// Write test run metadata
+	metadataPath := filepath.Join(runDir, "testrun.json")
+	metadataJSON, err := json.MarshalIndent(testRun, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal test run: %w", err)
+	}
+
+	if err := os.WriteFile(metadataPath, metadataJSON, 0644); err != nil {
+		return fmt.Errorf("failed to write test run metadata: %w", err)
+	}
+
+	a.logger.Debug().Str("dir", runDir).Str("id", testRun.ID).Msg("Recorded test run")
+	return nil
 }
