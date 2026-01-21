@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/perfgo/perfgo/cli/k8s"
+	"github.com/perfgo/perfgo/cli/perf"
 	"github.com/perfgo/perfgo/cli/ssh"
 	"github.com/urfave/cli/v2"
 )
@@ -32,8 +33,17 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 	podName := ctx.String("pod")
 	nodeName := ctx.String("node")
 	namespace := ctx.String("namespace")
-	perfEvent := ctx.String("event")
 	perfImage := ctx.String("perf-image")
+	duration := ctx.Int("duration")
+
+	var perfEvent string
+	var perfEvents []string
+	if mode == "profile" {
+		perfEvent = ctx.String("event")
+	} else if mode == "stat" {
+		perfEvents = ctx.StringSlice("event")
+		perfEvent = strings.Join(perfEvents, ",")
+	}
 
 	// Validate that exactly one of --pod or --node is specified
 	if podName == "" && nodeName == "" {
@@ -55,14 +65,22 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 	execCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	var target string
-	var targetType string
+	// Create temporary directory for SSH keys
+	tempDir, err := os.MkdirTemp("", "perfgo-ssh-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary directory: %w", err)
+	}
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			a.logger.Warn().Err(err).Str("path", tempDir).Msg("Failed to remove temporary directory")
+		} else {
+			a.logger.Debug().Str("path", tempDir).Msg("Cleaned up temporary SSH keys")
+		}
+	}()
+
 	var targetNodeName string
 
 	if podName != "" {
-		targetType = "pod"
-		target = podName
-
 		// Get the specific pod to extract container IDs and node information
 		a.logger.Info().
 			Str("pod", podName).
@@ -129,16 +147,10 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 			Msg("Perf pod is ready")
 
 		// Set up SSH keys in the pod
-		privateKeyPath, hostKeyPath, err := a.setupSSHKeys(execCtx, k8sClient, perfPodName, namespace)
+		privateKeyPath, hostKeyPath, err := a.setupSSHKeys(execCtx, k8sClient, perfPodName, namespace, tempDir)
 		if err != nil {
 			return fmt.Errorf("failed to setup SSH keys: %w", err)
 		}
-
-		// Build SSH connection command with all necessary parameters
-		sshCmd := fmt.Sprintf(`ssh -i %s -o IdentitiesOnly=yes -o UserKnownHostsFile=%s -o ProxyCommand="kubectl exec -i -n %s %s -- bash -c '/usr/sbin/sshd -i 2> /dev/null'" root@%s`,
-			privateKeyPath, hostKeyPath, namespace, perfPodName, perfPodName)
-
-		fmt.Printf("\nSSH connection command:\n%s\n\n", sshCmd)
 
 		// Create SSH client to the perf pod
 		a.logger.Info().Msg("Creating SSH client to perf pod")
@@ -167,9 +179,28 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 			Interface("pids", pids).
 			Msg("Found PIDs for containers")
 
+		// Flatten all PIDs into a single list for perf
+		allPIDs := []string{}
+		for _, pidList := range pids {
+			allPIDs = append(allPIDs, pidList...)
+		}
+
+		if len(allPIDs) == 0 {
+			return fmt.Errorf("no PIDs found for containers")
+		}
+
+		// Run perf stat or perf record
+		if mode == "stat" {
+			if err := a.executePerfStat(sshClient, allPIDs, perfEvent, duration); err != nil {
+				return fmt.Errorf("failed to execute perf stat: %w", err)
+			}
+		} else if mode == "profile" {
+			if err := a.executePerfRecord(sshClient, allPIDs, perfEvent, duration); err != nil {
+				return fmt.Errorf("failed to execute perf record: %w", err)
+			}
+		}
+
 	} else {
-		targetType = "node"
-		target = nodeName
 		targetNodeName = nodeName
 
 		// Verify node exists
@@ -200,39 +231,12 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 		}
 	}
 
-	// Execute the attach operation
-	if mode == "stat" {
-		a.logger.Info().
-			Str("target_type", targetType).
-			Str("target", target).
-			Str("event", perfEvent).
-			Msg("Running perf stat attach")
-
-		// TODO: Implement actual perf stat attach logic
-		fmt.Printf("Attaching perf stat to %s %s\n", targetType, target)
-		if perfEvent != "" {
-			fmt.Printf("Events: %s\n", perfEvent)
-		}
-		return fmt.Errorf("perf stat attach not yet implemented")
-	} else if mode == "profile" {
-		a.logger.Info().
-			Str("target_type", targetType).
-			Str("target", target).
-			Str("event", perfEvent).
-			Msg("Running perf profile attach")
-
-		// TODO: Implement actual perf profile attach logic
-		fmt.Printf("Attaching perf profile to %s %s\n", targetType, target)
-		fmt.Printf("Event: %s\n", perfEvent)
-		return fmt.Errorf("perf profile attach not yet implemented")
-	}
-
 	return nil
 }
 
 // setupSSHKeys sets up SSH keys in the perf pod for SSH access.
 // Returns the paths to the private key and host public key files.
-func (a *App) setupSSHKeys(ctx context.Context, client *k8s.Client, podName, namespace string) (string, string, error) {
+func (a *App) setupSSHKeys(ctx context.Context, client *k8s.Client, podName, namespace, tempDir string) (string, string, error) {
 	a.logger.Info().
 		Str("pod", podName).
 		Msg("Setting up SSH keys in perf pod")
@@ -291,37 +295,29 @@ func (a *App) setupSSHKeys(ctx context.Context, client *k8s.Client, podName, nam
 		return "", "", fmt.Errorf("failed to read host public key: %w", err)
 	}
 
-	// Save keys locally
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", "", fmt.Errorf("failed to get user home directory: %w", err)
-	}
-
-	sshDir := filepath.Join(homeDir, ".ssh", "perfgo")
-	if err := os.MkdirAll(sshDir, 0700); err != nil {
-		return "", "", fmt.Errorf("failed to create local SSH directory: %w", err)
-	}
+	// Save keys in temporary directory
+	a.logger.Debug().Str("tempDir", tempDir).Msg("Saving SSH keys to temporary directory")
 
 	// Save private key
-	privateKeyPath := filepath.Join(sshDir, fmt.Sprintf("%s_%s", namespace, podName))
+	privateKeyPath := filepath.Join(tempDir, "id_ed25519")
 	if err := os.WriteFile(privateKeyPath, []byte(privateKey), 0600); err != nil {
 		return "", "", fmt.Errorf("failed to save private key: %w", err)
 	}
 
-	a.logger.Info().
+	a.logger.Debug().
 		Str("path", privateKeyPath).
-		Msg("Private key saved locally")
+		Msg("Private key saved to temporary directory")
 
 	// Save host public key for known_hosts with pod name prepended
-	hostKeyPath := filepath.Join(sshDir, fmt.Sprintf("%s_%s.pub", namespace, podName))
+	hostKeyPath := filepath.Join(tempDir, "known_hosts")
 	hostKeyWithName := fmt.Sprintf("%s %s", podName, hostPublicKey)
 	if err := os.WriteFile(hostKeyPath, []byte(hostKeyWithName), 0644); err != nil {
 		return "", "", fmt.Errorf("failed to save host public key: %w", err)
 	}
 
-	a.logger.Info().
+	a.logger.Debug().
 		Str("path", hostKeyPath).
-		Msg("Host public key saved locally")
+		Msg("Host public key saved to temporary directory")
 
 	return privateKeyPath, hostKeyPath, nil
 }
@@ -364,11 +360,95 @@ func (a *App) findPIDsForContainers(client *ssh.Client, containerIDs map[string]
 				Strs("pids", pidList).
 				Msg("Found PIDs for container")
 		} else {
-			a.logger.Warn().
+			a.logger.Debug().
 				Str("container", containerName).
 				Msg("No PIDs found for container")
 		}
 	}
 
 	return pids, nil
+}
+
+// executePerfStat runs perf stat on the specified PIDs via SSH.
+func (a *App) executePerfStat(client *ssh.Client, pids []string, events string, duration int) error {
+	a.logger.Info().
+		Strs("pids", pids).
+		Str("events", events).
+		Int("duration", duration).
+		Msg("Running perf stat on PIDs")
+
+	// Build perf stat command
+	var eventList []string
+	if events != "" {
+		eventList = strings.Split(events, ",")
+	}
+
+	statOpts := perf.StatOptions{
+		Events:   eventList,
+		PIDs:     pids,
+		Duration: duration,
+	}
+	perfCmd := perf.BuildStatCommand(statOpts)
+
+	a.logger.Debug().Str("command", perfCmd).Msg("Executing perf stat command")
+
+	stdout, stderr, err := client.RunCommandWithStderr(perfCmd)
+	if err != nil {
+		return fmt.Errorf("perf stat failed: %w", err)
+	}
+
+	// Display the perf stat output (perf stat writes to stderr)
+	output := stderr
+	if output == "" {
+		output = stdout
+	}
+	
+	fmt.Println("\nPerf stat output:")
+	fmt.Println(output)
+
+	a.logger.Info().Msg("Perf stat completed successfully")
+	return nil
+}
+
+// executePerfRecord runs perf record on the specified PIDs via SSH.
+func (a *App) executePerfRecord(client *ssh.Client, pids []string, event string, duration int) error {
+	a.logger.Info().
+		Strs("pids", pids).
+		Str("event", event).
+		Int("duration", duration).
+		Msg("Running perf record on PIDs")
+
+	// Build perf record command
+	perfDataPath := "/tmp/perf.data"
+	recordOpts := perf.RecordOptions{
+		Event:      event,
+		PIDs:       pids,
+		Duration:   duration,
+		OutputPath: perfDataPath,
+	}
+	perfCmd := perf.BuildRecordCommand(recordOpts)
+
+	a.logger.Debug().Str("command", perfCmd).Msg("Executing perf record command")
+
+	output, err := client.RunCommand(perfCmd)
+	if err != nil {
+		return fmt.Errorf("perf record failed: %w", err)
+	}
+
+	// Display the output
+	if output != "" {
+		fmt.Println(output)
+	}
+
+	a.logger.Info().
+		Str("remote_path", perfDataPath).
+		Msg("Performance data collected on remote host")
+
+	// Process perf.data and convert to pprof
+	remoteBaseDir := "/tmp"
+	if err := perf.ProcessPerfData(a.logger, client, remoteBaseDir); err != nil {
+		return fmt.Errorf("failed to process performance data: %w", err)
+	}
+
+	return nil
 }

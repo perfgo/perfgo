@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/perfgo/perfgo/cli/perf"
 	"github.com/perfgo/perfgo/cli/ssh"
 	"github.com/perfgo/perfgo/model"
 )
@@ -83,26 +84,34 @@ func (a *App) executeRemoteTestInDir(sshClient *ssh.Client, remotePath, remoteDi
 	var remoteCmd string
 
 	if perfMode == "profile" {
-		// Wrap with perf record
+		// Build perf record command
 		perfDataPath := fmt.Sprintf("%s/perf.data", remoteBaseDir)
-		remoteCmd = fmt.Sprintf("cd %s && perf record -g --call-graph fp -e %s -o %s -- %s",
-			workDir, perfEvent, perfDataPath, remotePath)
+		recordOpts := perf.RecordOptions{
+			Event:      perfEvent,
+			OutputPath: perfDataPath,
+			Binary:     remotePath,
+			Args:       args,
+		}
+		perfCmd := perf.BuildRecordCommand(recordOpts)
+		remoteCmd = fmt.Sprintf("cd %s && %s", workDir, perfCmd)
 
 		a.logger.Info().
 			Str("event", perfEvent).
 			Str("output", perfDataPath).
 			Msg("Wrapping remote test execution with perf record")
 	} else if perfMode == "stat" {
-		// Wrap with perf stat
-		remoteCmd = fmt.Sprintf("cd %s && perf stat", workDir)
+		// Build perf stat command
+		var events []string
 		if perfEvent != "" {
-			// Split comma-separated events
-			events := strings.Split(perfEvent, ",")
-			for _, event := range events {
-				remoteCmd += fmt.Sprintf(" -e %s", strings.TrimSpace(event))
-			}
+			events = strings.Split(perfEvent, ",")
 		}
-		remoteCmd += fmt.Sprintf(" -- %s", remotePath)
+		statOpts := perf.StatOptions{
+			Events: events,
+			Binary: remotePath,
+			Args:   args,
+		}
+		perfCmd := perf.BuildStatCommand(statOpts)
+		remoteCmd = fmt.Sprintf("cd %s && %s", workDir, perfCmd)
 
 		a.logger.Info().
 			Str("events", perfEvent).
@@ -110,14 +119,13 @@ func (a *App) executeRemoteTestInDir(sshClient *ssh.Client, remotePath, remoteDi
 	} else {
 		// Direct execution without perf
 		remoteCmd = fmt.Sprintf("cd %s && %s", workDir, remotePath)
-	}
 
-	if len(args) > 0 {
-		// Append arguments to the remote command
-		for _, arg := range args {
-			// Simple shell escaping - wrap in single quotes and escape any single quotes
-			escapedArg := strings.ReplaceAll(arg, "'", "'\\''")
-			remoteCmd += fmt.Sprintf(" '%s'", escapedArg)
+		// Append arguments for direct execution
+		if len(args) > 0 {
+			for _, arg := range args {
+				escapedArg := strings.ReplaceAll(arg, "'", "'\\''")
+				remoteCmd += fmt.Sprintf(" '%s'", escapedArg)
+			}
 		}
 	}
 

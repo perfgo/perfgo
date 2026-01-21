@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/perfgo/perfgo/cli/perf"
 	"github.com/perfgo/perfgo/model"
 )
 
@@ -25,26 +26,31 @@ func (a *App) executeLocalTest(binaryPath, perfMode, perfEvent string, args []st
 	var cmd *exec.Cmd
 
 	if perfMode == "profile" {
-		// Build perf command: perf record -g --call-graph fp -e <event> -o perf.data -- <binary> <args>
-		perfArgs := []string{"record", "-g", "--call-graph", "fp", "-e", perfEvent, "-o", "perf.data", "--", binaryPath}
-		perfArgs = append(perfArgs, args...)
+		// Build perf record command
+		recordOpts := perf.RecordOptions{
+			Event:      perfEvent,
+			OutputPath: "perf.data",
+			Binary:     binaryPath,
+			Args:       args,
+		}
+		perfArgs := perf.BuildRecordArgs(recordOpts)
 		cmd = exec.Command("perf", perfArgs...)
 
 		a.logger.Info().
 			Str("event", perfEvent).
 			Msg("Wrapping test execution with perf record")
 	} else if perfMode == "stat" {
-		// Build perf command: perf stat -e <events> -- <binary> <args>
-		perfArgs := []string{"stat"}
+		// Build perf stat command
+		var events []string
 		if perfEvent != "" {
-			// Split comma-separated events
-			events := strings.Split(perfEvent, ",")
-			for _, event := range events {
-				perfArgs = append(perfArgs, "-e", strings.TrimSpace(event))
-			}
+			events = strings.Split(perfEvent, ",")
 		}
-		perfArgs = append(perfArgs, "--", binaryPath)
-		perfArgs = append(perfArgs, args...)
+		statOpts := perf.StatOptions{
+			Events: events,
+			Binary: binaryPath,
+			Args:   args,
+		}
+		perfArgs := perf.BuildStatArgs(statOpts)
 		cmd = exec.Command("perf", perfArgs...)
 
 		a.logger.Info().

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/perfgo/perfgo/cli/perf"
 	"github.com/perfgo/perfgo/cli/ssh"
 	"github.com/perfgo/perfgo/model"
 	"github.com/rs/zerolog"
@@ -74,11 +75,7 @@ func New() *App {
 						Name:  "keep",
 						Usage: "Keep remote artifacts (don't clean up after test execution)",
 					},
-					&cli.StringSliceFlag{
-						Name:    "event",
-						Aliases: []string{"e"},
-						Usage:   "Event to measure (can be specified multiple times)",
-					},
+					perf.StatEventFlag(),
 				},
 			},
 			{
@@ -94,12 +91,7 @@ func New() *App {
 						Name:  "keep",
 						Usage: "Keep remote artifacts (don't clean up after test execution)",
 					},
-					&cli.StringFlag{
-						Name:    "event",
-						Aliases: []string{"e"},
-						Usage:   "Event to record (default: cycles:u)",
-						Value:   "cycles:u",
-					},
+					perf.ProfileEventFlag(),
 				},
 			},
 		},
@@ -160,16 +152,13 @@ func New() *App {
 						Aliases: []string{"n"},
 						Usage:   "Kubernetes namespace (for pods, default: default)",
 					},
-					&cli.StringSliceFlag{
-						Name:    "event",
-						Aliases: []string{"e"},
-						Usage:   "Event to measure (can be specified multiple times)",
-					},
+					perf.StatEventFlag(),
 					&cli.StringFlag{
 						Name:  "perf-image",
 						Usage: "Container image for running perf",
 						Value: defaultPerfImage,
 					},
+					perf.DurationFlag(),
 				},
 			},
 			{
@@ -183,7 +172,7 @@ func New() *App {
 					},
 					&cli.StringFlag{
 						Name:  "pod",
-						Usage: "Pod name to attach to (mutually exclusive with --node)",
+						Usage: "Pod name to attach to (mutually exclusive with --pod)",
 					},
 					&cli.StringFlag{
 						Name:  "node",
@@ -194,17 +183,13 @@ func New() *App {
 						Aliases: []string{"n"},
 						Usage:   "Kubernetes namespace (for pods, default: default)",
 					},
-					&cli.StringFlag{
-						Name:    "event",
-						Aliases: []string{"e"},
-						Usage:   "Event to record (default: cycles:u)",
-						Value:   "cycles:u",
-					},
+					perf.ProfileEventFlag(),
 					&cli.StringFlag{
 						Name:  "perf-image",
 						Usage: "Container image for running perf",
 						Value: defaultPerfImage,
 					},
+					perf.DurationFlag(),
 				},
 			},
 		},
@@ -424,7 +409,7 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 			}
 
 			// Copy back and process perf.data
-			if err := a.processPerfData(sshClient, remoteBaseDir); err != nil {
+			if err := perf.ProcessPerfData(a.logger, sshClient, remoteBaseDir); err != nil {
 				a.logger.Error().Err(err).Msg("Failed to process performance data")
 				finalErr = err
 				return err
@@ -478,7 +463,7 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 			}
 
 			// Process perf.data
-			if err := a.convertPerfToPprof("perf.data"); err != nil {
+			if err := perf.ConvertPerfToPprof(a.logger, "perf.data"); err != nil {
 				a.logger.Error().Err(err).Msg("Failed to convert performance data to pprof")
 				finalErr = err
 				return err

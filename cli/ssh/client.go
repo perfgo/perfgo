@@ -121,6 +121,29 @@ func (c *Client) RunCommand(command string) (string, error) {
 	return stdout.String(), nil
 }
 
+// RunCommandWithStderr executes a command on the remote host and returns both stdout and stderr.
+func (c *Client) RunCommandWithStderr(command string) (stdout, stderr string, err error) {
+	args := c.buildSSHArgs()
+	args = append(args, c.host, command)
+
+	cmd := exec.Command("ssh", args...)
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	c.logger.Debug().
+		Str("host", c.host).
+		Str("command", command).
+		Msg("Running remote command")
+
+	if err := cmd.Run(); err != nil {
+		return "", "", fmt.Errorf("command failed: %w (stderr: %s)", err, stderrBuf.String())
+	}
+
+	return stdoutBuf.String(), stderrBuf.String(), nil
+}
+
 // buildSSHArgs constructs the SSH arguments with all configured options.
 func (c *Client) buildSSHArgs() []string {
 	args := []string{}
