@@ -18,6 +18,7 @@ import (
 )
 
 const AppName = "perfgo"
+const defaultPerfImage = "docker.io/simonswine/perf-image@sha256:877dd618f656feb8ac79bca1bbbd2c1b4103adb643b819f9b2cd8559eb12bf01"
 
 type App struct {
 	logger zerolog.Logger
@@ -164,6 +165,11 @@ func New() *App {
 						Aliases: []string{"e"},
 						Usage:   "Event to measure (can be specified multiple times)",
 					},
+					&cli.StringFlag{
+						Name:  "perf-image",
+						Usage: "Container image for running perf",
+						Value: defaultPerfImage,
+					},
 				},
 			},
 			{
@@ -193,6 +199,11 @@ func New() *App {
 						Aliases: []string{"e"},
 						Usage:   "Event to record (default: cycles:u)",
 						Value:   "cycles:u",
+					},
+					&cli.StringFlag{
+						Name:  "perf-image",
+						Usage: "Container image for running perf",
+						Value: defaultPerfImage,
 					},
 				},
 			},

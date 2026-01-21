@@ -19,16 +19,56 @@ import (
 
 // Client manages an SSH connection to a specific remote host.
 type Client struct {
-	logger      zerolog.Logger
-	host        string
-	controlPath string
+	logger         zerolog.Logger
+	host           string
+	controlPath    string
+	identityFile   string
+	knownHostsFile string
+	proxyCommand   string
+	extraOptions   []string
+}
+
+// SSHOption is a function that configures an SSH client.
+type SSHOption func(*Client)
+
+// WithIdentityFile sets the identity file (private key) to use for authentication.
+func WithIdentityFile(path string) SSHOption {
+	return func(c *Client) {
+		c.identityFile = path
+	}
+}
+
+// WithKnownHostsFile sets the known hosts file to use for host verification.
+func WithKnownHostsFile(path string) SSHOption {
+	return func(c *Client) {
+		c.knownHostsFile = path
+	}
+}
+
+// WithProxyCommand sets a proxy command for the SSH connection.
+func WithProxyCommand(command string) SSHOption {
+	return func(c *Client) {
+		c.proxyCommand = command
+	}
+}
+
+// WithExtraOptions adds extra SSH options to the connection.
+func WithExtraOptions(options ...string) SSHOption {
+	return func(c *Client) {
+		c.extraOptions = append(c.extraOptions, options...)
+	}
 }
 
 // New creates a new SSH client and establishes a multiplexed connection to the host.
-func New(logger zerolog.Logger, host string) (*Client, error) {
+func New(logger zerolog.Logger, host string, opts ...SSHOption) (*Client, error) {
 	c := &Client{
 		logger: logger,
 		host:   host,
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(c)
 	}
 
 	// Setup SSH multiplexing
@@ -46,11 +86,12 @@ func (c *Client) Close() {
 	c.logger.Debug().Str("controlPath", c.controlPath).Msg("Cleaning up SSH multiplexing")
 
 	// Close the master connection
-	cmd := exec.Command("ssh",
+	args := []string{
 		"-o", fmt.Sprintf("ControlPath=%s", c.controlPath),
 		"-O", "exit",
 		c.host,
-	)
+	}
+	cmd := exec.Command("ssh", args...)
 	_ = cmd.Run() // Ignore errors on cleanup
 
 	// Remove the control socket file if it still exists
@@ -59,12 +100,10 @@ func (c *Client) Close() {
 
 // RunCommand executes a command on the remote host and returns the output.
 func (c *Client) RunCommand(command string) (string, error) {
-	cmd := exec.Command("ssh",
-		"-o", fmt.Sprintf("ControlPath=%s", c.controlPath),
-		"-o", "ControlMaster=no",
-		c.host,
-		command,
-	)
+	args := c.buildSSHArgs()
+	args = append(args, c.host, command)
+
+	cmd := exec.Command("ssh", args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -80,6 +119,41 @@ func (c *Client) RunCommand(command string) (string, error) {
 	}
 
 	return stdout.String(), nil
+}
+
+// buildSSHArgs constructs the SSH arguments with all configured options.
+func (c *Client) buildSSHArgs() []string {
+	args := []string{}
+
+	// Add control path options if using multiplexing
+	if c.controlPath != "" {
+		args = append(args,
+			"-o", fmt.Sprintf("ControlPath=%s", c.controlPath),
+			"-o", "ControlMaster=no",
+		)
+	}
+
+	// Add identity file if specified
+	if c.identityFile != "" {
+		args = append(args, "-i", c.identityFile)
+	}
+
+	// Add known hosts file if specified
+	if c.knownHostsFile != "" {
+		args = append(args, "-o", fmt.Sprintf("UserKnownHostsFile=%s", c.knownHostsFile))
+	}
+
+	// Add proxy command if specified
+	if c.proxyCommand != "" {
+		args = append(args, "-o", fmt.Sprintf("ProxyCommand=%s", c.proxyCommand))
+	}
+
+	// Add extra options
+	for _, opt := range c.extraOptions {
+		args = append(args, "-o", opt)
+	}
+
+	return args
 }
 
 // DetectSystem detects the OS and architecture of the remote system.
@@ -198,12 +272,9 @@ func (c *Client) SyncDirectoryToRemote(remoteBaseDir string) (string, error) {
 	)
 
 	// Pipe directly to SSH and extract on remote
-	sshCmd := exec.Command("ssh",
-		"-o", fmt.Sprintf("ControlPath=%s", c.controlPath),
-		"-o", "ControlMaster=no",
-		c.host,
-		fmt.Sprintf("cd %s && tar -xzf -", remoteDir),
-	)
+	args := c.buildSSHArgs()
+	args = append(args, c.host, fmt.Sprintf("cd %s && tar -xzf -", remoteDir))
+	sshCmd := exec.Command("ssh", args...)
 
 	// Connect the archive output to ssh input
 	pipe, err := archiveCmd.StdoutPipe()
@@ -257,12 +328,9 @@ func (c *Client) CopyBinaryToRemote(localPath, remoteBaseDir string) (string, er
 	}
 
 	// Use scp with the SSH multiplexing control path
-	cmd := exec.Command("scp",
-		"-o", fmt.Sprintf("ControlPath=%s", c.controlPath),
-		"-o", "ControlMaster=no",
-		localPath,
-		fmt.Sprintf("%s:%s", c.host, remotePath),
-	)
+	args := c.buildSSHArgs()
+	args = append(args, localPath, fmt.Sprintf("%s:%s", c.host, remotePath))
+	cmd := exec.Command("scp", args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -325,17 +393,42 @@ func (c *Client) setupMultiplexing() (string, error) {
 		Msg("Setting up SSH multiplexing")
 
 	// Establish the master connection
-	cmd := exec.Command("ssh",
+	args := []string{
 		"-o", "ControlMaster=auto",
 		"-o", fmt.Sprintf("ControlPath=%s", controlPath),
 		"-o", "ControlPersist=30s",
 		"-o", "ConnectTimeout=10",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
+	}
+
+	// Add identity file if specified
+	if c.identityFile != "" {
+		args = append(args, "-i", c.identityFile)
+	}
+
+	// Add known hosts file if specified
+	if c.knownHostsFile != "" {
+		args = append(args, "-o", fmt.Sprintf("UserKnownHostsFile=%s", c.knownHostsFile))
+	}
+
+	// Add proxy command if specified
+	if c.proxyCommand != "" {
+		args = append(args, "-o", fmt.Sprintf("ProxyCommand=%s", c.proxyCommand))
+	}
+
+	// Add extra options
+	for _, opt := range c.extraOptions {
+		args = append(args, "-o", opt)
+	}
+
+	args = append(args,
 		"-f", // Run in background
 		"-N", // Don't execute a remote command
 		c.host,
 	)
+
+	cmd := exec.Command("ssh", args...)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

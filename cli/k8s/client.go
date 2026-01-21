@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -86,12 +87,13 @@ type Container struct {
 
 // PodStatus contains pod status information.
 type PodStatus struct {
-	Phase      string           `json:"phase"`
-	Conditions []PodCondition   `json:"conditions,omitempty"`
-	PodIP      string           `json:"podIP,omitempty"`
-	HostIP     string           `json:"hostIP,omitempty"`
-	StartTime  *time.Time       `json:"startTime,omitempty"`
+	Phase             string            `json:"phase"`
+	Conditions        []PodCondition    `json:"conditions,omitempty"`
+	PodIP             string            `json:"podIP,omitempty"`
+	HostIP            string            `json:"hostIP,omitempty"`
+	StartTime         *time.Time        `json:"startTime,omitempty"`
 	ContainerStatuses []ContainerStatus `json:"containerStatuses,omitempty"`
+	InitContainerStatuses []ContainerStatus `json:"initContainerStatuses,omitempty"`
 }
 
 // PodCondition represents a condition of the pod.
@@ -102,9 +104,10 @@ type PodCondition struct {
 
 // ContainerStatus contains container status information.
 type ContainerStatus struct {
-	Name  string `json:"name"`
-	Ready bool   `json:"ready"`
-	State ContainerState `json:"state"`
+	Name        string         `json:"name"`
+	Ready       bool           `json:"ready"`
+	State       ContainerState `json:"state"`
+	ContainerID string         `json:"containerID,omitempty"`
 }
 
 // ContainerState represents the state of a container.
@@ -220,6 +223,182 @@ func (c *Client) GetPodsInNamespace(ctx context.Context, namespace string) ([]Po
 	}
 
 	return podList.Items, nil
+}
+
+// GetPod retrieves a specific pod by name in the configured namespace.
+func (c *Client) GetPod(ctx context.Context, name string) (*Pod, error) {
+	args := []string{"get", "pod", name, "-o", "json"}
+
+	// Add context if specified
+	if c.kubeContext != "" {
+		args = append([]string{"--context", c.kubeContext}, args...)
+	}
+
+	// Add namespace if specified
+	if c.namespace != "" {
+		args = append(args, "-n", c.namespace)
+	}
+
+	output, err := c.runKubectl(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pod %s: %w", name, err)
+	}
+
+	var pod Pod
+	if err := json.Unmarshal([]byte(output), &pod); err != nil {
+		return nil, fmt.Errorf("failed to parse pod response: %w", err)
+	}
+
+	return &pod, nil
+}
+
+// GetContainerIDs extracts all container IDs from a pod.
+// Returns a map of container name to container ID.
+// Container IDs have the runtime prefix (e.g., "containerd://", "docker://") stripped.
+func GetContainerIDs(pod *Pod) map[string]string {
+	containerIDs := make(map[string]string)
+
+	// Process init containers
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.ContainerID != "" {
+			containerIDs[status.Name] = stripContainerIDPrefix(status.ContainerID)
+		}
+	}
+
+	// Process regular containers
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.ContainerID != "" {
+			containerIDs[status.Name] = stripContainerIDPrefix(status.ContainerID)
+		}
+	}
+
+	return containerIDs
+}
+
+// stripContainerIDPrefix removes the runtime prefix from container IDs.
+// For example, "containerd://abc123" becomes "abc123".
+func stripContainerIDPrefix(containerID string) string {
+	// Container IDs from Kubernetes are in format: <runtime>://<id>
+	// Common runtimes: containerd, docker, cri-o
+	if idx := strings.Index(containerID, "://"); idx != -1 {
+		return containerID[idx+3:]
+	}
+	return containerID
+}
+
+// CreatePrivilegedPod creates a new privileged pod using kubectl run.
+// The pod will run an infinite sleep command and be scheduled on the specified node.
+// It uses the host PID namespace and runs with privileged security context.
+func (c *Client) CreatePrivilegedPod(ctx context.Context, name, image, nodeName string) error {
+	overrides := fmt.Sprintf(`{
+		"metadata": {
+			"labels": {
+				"app.kubernetes.io/name": "perfgo",
+				"app.kubernetes.io/component": "perf-profiler",
+				"app.kubernetes.io/managed-by": "perfgo"
+			}
+		},
+		"spec": {
+			"hostPID": true,
+			"nodeName": "%s",
+			"containers": [{
+				"name": "%s",
+				"image": "%s",
+				"command": ["sleep", "infinity"],
+				"securityContext": {
+					"privileged": true
+				}
+			}]
+		}
+	}`, nodeName, name, image)
+
+	args := []string{
+		"run", name,
+		"--image=" + image,
+		"--restart=Never",
+		"--overrides=" + overrides,
+	}
+
+	// Add context if specified
+	if c.kubeContext != "" {
+		args = append([]string{"--context", c.kubeContext}, args...)
+	}
+
+	// Add namespace if specified
+	if c.namespace != "" {
+		args = append(args, "-n", c.namespace)
+	}
+
+	_, err := c.runKubectl(ctx, args...)
+	if err != nil {
+		return fmt.Errorf("failed to create privileged pod %s: %w", name, err)
+	}
+
+	return nil
+}
+
+// WaitForPodReady waits for a pod to be in the Running phase and ready.
+// It polls the pod status until it's ready or the context is cancelled.
+func (c *Client) WaitForPodReady(ctx context.Context, name string) error {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for pod %s to be ready: %w", name, ctx.Err())
+		case <-ticker.C:
+			pod, err := c.GetPod(ctx, name)
+			if err != nil {
+				continue // Pod might not exist yet
+			}
+
+			if pod.Status.Phase == "Running" {
+				// Check if all containers are ready
+				allReady := true
+				for _, status := range pod.Status.ContainerStatuses {
+					if !status.Ready {
+						allReady = false
+						break
+					}
+				}
+				if allReady {
+					return nil
+				}
+			}
+		}
+	}
+}
+
+// ExecCommand executes a command in a pod container.
+func (c *Client) ExecCommand(ctx context.Context, podName string, command []string) (string, error) {
+	args := []string{}
+
+	// Add context if specified
+	if c.kubeContext != "" {
+		args = append(args, "--context", c.kubeContext)
+	}
+
+	// Add namespace if specified
+	if c.namespace != "" {
+		args = append(args, "-n", c.namespace)
+	}
+
+	// Add exec command
+	args = append(args, "exec", podName, "--")
+	args = append(args, command...)
+
+	output, err := c.runKubectl(ctx, args...)
+	if err != nil {
+		return "", fmt.Errorf("failed to exec command in pod %s: %w", podName, err)
+	}
+
+	return output, nil
+}
+
+// ReadFileFromPod reads a file from a pod using kubectl exec cat.
+func (c *Client) ReadFileFromPod(ctx context.Context, podName, filePath string) (string, error) {
+	return c.ExecCommand(ctx, podName, []string{"cat", filePath})
 }
 
 // Context returns the Kubernetes context this client is configured for.

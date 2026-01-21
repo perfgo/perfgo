@@ -10,6 +10,7 @@ FROM debian:trixie
 RUN \
   apt-get update && \
   apt-get install -y linux-perf openssh-server && \
+  rm -v /etc/ssh/ssh_host_* && \
   apt-get clean
 
 COPY --from=addr2line /opt/cargo/bin/addr2line /usr/local/bin/addr2line
