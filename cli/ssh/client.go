@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,39 +99,60 @@ func (c *Client) Close() {
 	_ = os.Remove(c.controlPath)
 }
 
-// RunCommand executes a command on the remote host and returns the output.
-func (c *Client) RunCommand(command string) (string, error) {
-	args := c.buildSSHArgs()
-	args = append(args, c.host, command)
-
-	cmd := exec.Command("ssh", args...)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	c.logger.Debug().
-		Str("host", c.host).
-		Str("command", command).
-		Msg("Running remote command")
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("command failed: %w (stderr: %s)", err, stderr.String())
-	}
-
-	return stdout.String(), nil
+type runOptions struct {
+	stdout io.Writer
+	stderr io.Writer
+	stdin  io.Reader
+	tty    bool
 }
 
-// RunCommandWithStderr executes a command on the remote host and returns both stdout and stderr.
-func (c *Client) RunCommandWithStderr(command string) (stdout, stderr string, err error) {
+type RunOption func(*runOptions)
+
+func WithStdOut(w io.Writer) RunOption {
+	return func(o *runOptions) {
+		o.stdout = w
+	}
+}
+
+func WithStdErr(w io.Writer) RunOption {
+	return func(o *runOptions) {
+		o.stderr = w
+	}
+}
+
+func WithStdIn(r io.Reader) RunOption {
+	return func(o *runOptions) {
+		o.stdin = r
+	}
+}
+
+func WithTTY(tty bool) RunOption {
+	return func(o *runOptions) {
+		o.tty = tty
+	}
+}
+
+// RunCommand executes a command on the remote host and returns the output.
+func (c *Client) Run(command string, optFuncs ...RunOption) error {
 	args := c.buildSSHArgs()
+	
+	opts := &runOptions{}
+	for _, f := range optFuncs {
+		f(opts)
+	}
+	
+	// Add TTY flags if requested
+	if opts.tty {
+		args = append(args, "-t", "-t") // -t -t forces TTY allocation even without controlling terminal
+	}
+	
 	args = append(args, c.host, command)
 
 	cmd := exec.Command("ssh", args...)
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	cmd.Stdout = opts.stdout
+	cmd.Stderr = opts.stderr
+	cmd.Stdin = opts.stdin
 
 	c.logger.Debug().
 		Str("host", c.host).
@@ -138,9 +160,22 @@ func (c *Client) RunCommandWithStderr(command string) (stdout, stderr string, er
 		Msg("Running remote command")
 
 	if err := cmd.Run(); err != nil {
-		return "", "", fmt.Errorf("command failed: %w (stderr: %s)", err, stderrBuf.String())
+		return err
 	}
 
+	return nil
+}
+
+// RunCommand executes a command on the remote host and returns the output.
+func (c *Client) RunCommand(command string, optFuncs ...RunOption) (string, string, error) {
+	var stdoutBuf, stderrBuf bytes.Buffer
+	if err := c.Run(
+		command,
+		WithStdOut(&stdoutBuf),
+		WithStdErr(&stderrBuf),
+	); err != nil {
+		return "", "", fmt.Errorf("command failed: %w (stderr: %s)", err, stderrBuf.String())
+	}
 	return stdoutBuf.String(), stderrBuf.String(), nil
 }
 
@@ -182,13 +217,13 @@ func (c *Client) buildSSHArgs() []string {
 // DetectSystem detects the OS and architecture of the remote system.
 func (c *Client) DetectSystem() (string, string, error) {
 	// Detect OS
-	osName, err := c.RunCommand("uname -s")
+	osName, _, err := c.RunCommand("uname -s")
 	if err != nil {
 		return "", "", fmt.Errorf("failed to detect OS: %w", err)
 	}
 
 	// Detect architecture
-	arch, err := c.RunCommand("uname -m")
+	arch, _, err := c.RunCommand("uname -m")
 	if err != nil {
 		return "", "", fmt.Errorf("failed to detect architecture: %w", err)
 	}
@@ -279,7 +314,7 @@ func (c *Client) SyncDirectoryToRemote(remoteBaseDir string) (string, error) {
 
 	// Create remote directory
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteDir)
-	if _, err := c.RunCommand(mkdirCmd); err != nil {
+	if _, _, err := c.RunCommand(mkdirCmd); err != nil {
 		return "", fmt.Errorf("failed to create remote directory: %w", err)
 	}
 
@@ -346,7 +381,7 @@ func (c *Client) CopyBinaryToRemote(localPath, remoteBaseDir string) (string, er
 
 	// Ensure the remote base directory exists
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteBaseDir)
-	if _, err := c.RunCommand(mkdirCmd); err != nil {
+	if _, _, err := c.RunCommand(mkdirCmd); err != nil {
 		return "", fmt.Errorf("failed to create remote base directory: %w", err)
 	}
 
@@ -369,7 +404,7 @@ func (c *Client) CopyBinaryToRemote(localPath, remoteBaseDir string) (string, er
 
 	// Make the binary executable on the remote host
 	chmodCmd := fmt.Sprintf("chmod +x %s", remotePath)
-	if _, err := c.RunCommand(chmodCmd); err != nil {
+	if _, _, err := c.RunCommand(chmodCmd); err != nil {
 		return "", fmt.Errorf("failed to make binary executable: %w", err)
 	}
 
@@ -500,7 +535,7 @@ else
     echo "/tmp/perfgo"
 fi
 `
-	cacheDir, err := c.RunCommand(getCacheDirCmd)
+	cacheDir, _, err := c.RunCommand(getCacheDirCmd)
 	if err != nil {
 		return "", fmt.Errorf("failed to determine remote cache directory: %w", err)
 	}

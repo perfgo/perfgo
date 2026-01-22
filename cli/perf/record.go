@@ -174,7 +174,7 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 
 	// Run perf script remotely and capture output
 	perfScriptCmd := fmt.Sprintf("perf script -i %s", remotePerfData)
-	scriptOutput, err := sshClient.RunCommand(perfScriptCmd)
+	scriptOutput, _, err := sshClient.RunCommand(perfScriptCmd)
 	if err != nil {
 		return fmt.Errorf("failed to run perf script remotely: %w", err)
 	}

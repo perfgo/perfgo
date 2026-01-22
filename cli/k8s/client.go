@@ -401,6 +401,31 @@ func (c *Client) ReadFileFromPod(ctx context.Context, podName, filePath string) 
 	return c.ExecCommand(ctx, podName, []string{"cat", filePath})
 }
 
+// DeletePod deletes a pod by name in the configured namespace.
+func (c *Client) DeletePod(ctx context.Context, name string) error {
+	args := []string{"delete", "pod", name}
+
+	// Add context if specified
+	if c.kubeContext != "" {
+		args = append([]string{"--context", c.kubeContext}, args...)
+	}
+
+	// Add namespace if specified
+	if c.namespace != "" {
+		args = append(args, "-n", c.namespace)
+	}
+
+	// Add grace period to delete immediately
+	args = append(args, "--grace-period=0", "--force")
+
+	_, err := c.runKubectl(ctx, args...)
+	if err != nil {
+		return fmt.Errorf("failed to delete pod %s: %w", name, err)
+	}
+
+	return nil
+}
+
 // Context returns the Kubernetes context this client is configured for.
 func (c *Client) Context() string {
 	return c.kubeContext

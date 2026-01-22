@@ -27,6 +27,10 @@ func (a *App) attachProfile(ctx *cli.Context) error {
 	return a.runAttach(ctx, "profile")
 }
 
+func (a *App) attachShell(ctx *cli.Context) error {
+	return a.runAttach(ctx, "shell")
+}
+
 func (a *App) runAttach(ctx *cli.Context, mode string) error {
 	// Get flags
 	kubeContext := ctx.String("context")
@@ -78,7 +82,17 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 		}
 	}()
 
-	var targetNodeName string
+	// Generate random suffix for pod name
+	suffixBytes := make([]byte, 4)
+	if _, err := rand.Read(suffixBytes); err != nil {
+		return fmt.Errorf("failed to generate random suffix: %w", err)
+	}
+	randomSuffix := hex.EncodeToString(suffixBytes)
+
+	var (
+		containerIDs = make(map[string]string)
+		perfPodName  string
+	)
 
 	if podName != "" {
 		// Get the specific pod to extract container IDs and node information
@@ -92,16 +106,16 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 			return fmt.Errorf("failed to get pod: %w", err)
 		}
 
-		targetNodeName = pod.Spec.NodeName
+		nodeName = pod.Spec.NodeName
 
 		a.logger.Info().
 			Str("pod", podName).
-			Str("node", targetNodeName).
+			Str("node", nodeName).
 			Str("phase", pod.Status.Phase).
 			Msg("Found pod")
 
 		// Extract container IDs
-		containerIDs := k8s.GetContainerIDs(pod)
+		containerIDs = k8s.GetContainerIDs(pod)
 		if len(containerIDs) > 0 {
 			a.logger.Info().
 				Interface("container_ids", containerIDs).
@@ -109,66 +123,114 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 		} else {
 			a.logger.Warn().Msg("No container IDs found in pod status")
 		}
+		perfPodName = fmt.Sprintf("perfgo-%s-%s", podName, randomSuffix)
+	} else {
+		perfPodName = fmt.Sprintf("perfgo-%s-%s", nodeName, randomSuffix)
+	}
 
-		// Generate random suffix for pod name
-		suffixBytes := make([]byte, 4)
-		if _, err := rand.Read(suffixBytes); err != nil {
-			return fmt.Errorf("failed to generate random suffix: %w", err)
+	// Verify node exists
+	a.logger.Info().
+		Str("node", nodeName).
+		Msg("Verifying node exists")
+
+	nodes, err := k8sClient.GetNodes(execCtx)
+	if err != nil {
+		return fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	found := false
+	for _, node := range nodes {
+		if node.Metadata.Name == nodeName {
+			found = true
+			a.logger.Info().
+				Str("node", nodeName).
+				Str("os", node.Status.NodeInfo.OperatingSystem).
+				Str("arch", node.Status.NodeInfo.Architecture).
+				Msg("Found node")
+			break
 		}
-		randomSuffix := hex.EncodeToString(suffixBytes)
+	}
 
-		// Create a privileged perf pod on the same node
-		perfPodName := fmt.Sprintf("perfgo-%s-%s", podName, randomSuffix)
+	if !found {
+		return fmt.Errorf("node %s not found in cluster", nodeName)
+	}
+
+	// TODO: Validate instance types and their support of PMUs
+
+	// Create a privileged perf pod on the same node
+	a.logger.Info().
+		Str("perf_pod", perfPodName).
+		Str("image", perfImage).
+		Str("node", nodeName).
+		Msg("Creating privileged perf pod")
+
+	if err := k8sClient.CreatePrivilegedPod(execCtx, perfPodName, perfImage, nodeName); err != nil {
+		return fmt.Errorf("failed to create privileged perf pod: %w", err)
+	}
+
+	// Ensure pod is deleted when we're done
+	defer func() {
+		deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer deleteCancel()
+
 		a.logger.Info().
 			Str("perf_pod", perfPodName).
-			Str("image", perfImage).
-			Str("node", targetNodeName).
-			Msg("Creating privileged perf pod")
+			Msg("Deleting perf pod")
 
-		if err := k8sClient.CreatePrivilegedPod(execCtx, perfPodName, perfImage, targetNodeName); err != nil {
-			return fmt.Errorf("failed to create privileged perf pod: %w", err)
+		if err := k8sClient.DeletePod(deleteCtx, perfPodName); err != nil {
+			a.logger.Warn().
+				Err(err).
+				Str("perf_pod", perfPodName).
+				Msg("Failed to delete perf pod")
+		} else {
+			a.logger.Info().
+				Str("perf_pod", perfPodName).
+				Msg("Perf pod deleted successfully")
 		}
+	}()
 
-		a.logger.Info().
-			Str("perf_pod", perfPodName).
-			Msg("Privileged perf pod created successfully")
+	a.logger.Info().
+		Str("perf_pod", perfPodName).
+		Msg("Privileged perf pod created successfully")
 
-		// Wait for pod to be ready
-		a.logger.Info().
-			Str("perf_pod", perfPodName).
-			Msg("Waiting for perf pod to be ready")
+	// Wait for pod to be ready
+	a.logger.Info().
+		Str("perf_pod", perfPodName).
+		Msg("Waiting for perf pod to be ready")
 
-		if err := k8sClient.WaitForPodReady(execCtx, perfPodName); err != nil {
-			return fmt.Errorf("failed to wait for perf pod to be ready: %w", err)
-		}
+	if err := k8sClient.WaitForPodReady(execCtx, perfPodName); err != nil {
+		return fmt.Errorf("failed to wait for perf pod to be ready: %w", err)
+	}
 
-		a.logger.Info().
-			Str("perf_pod", perfPodName).
-			Msg("Perf pod is ready")
+	a.logger.Info().
+		Str("perf_pod", perfPodName).
+		Msg("Perf pod is ready")
 
-		// Set up SSH keys in the pod
-		privateKeyPath, hostKeyPath, err := a.setupSSHKeys(execCtx, k8sClient, perfPodName, namespace, tempDir)
-		if err != nil {
-			return fmt.Errorf("failed to setup SSH keys: %w", err)
-		}
+	// Set up SSH keys in the pod
+	privateKeyPath, hostKeyPath, err := a.setupSSHKeys(execCtx, k8sClient, perfPodName, namespace, tempDir)
+	if err != nil {
+		return fmt.Errorf("failed to setup SSH keys: %w", err)
+	}
 
-		// Create SSH client to the perf pod
-		a.logger.Info().Msg("Creating SSH client to perf pod")
-		proxyCmd := fmt.Sprintf("kubectl exec -i -n %s %s -- bash -c '/usr/sbin/sshd -i 2> /dev/null'", namespace, perfPodName)
-		sshHost := fmt.Sprintf("root@%s", perfPodName)
+	// Create SSH client to the perf pod
+	a.logger.Info().Msg("Creating SSH client to perf pod")
+	proxyCmd := fmt.Sprintf("kubectl exec -i -n %s %s -- bash -c '/usr/sbin/sshd -i 2> /dev/null'", namespace, perfPodName)
+	sshHost := fmt.Sprintf("root@%s", perfPodName)
 
-		sshClient, err := ssh.New(a.logger, sshHost,
-			ssh.WithIdentityFile(privateKeyPath),
-			ssh.WithKnownHostsFile(hostKeyPath),
-			ssh.WithProxyCommand(proxyCmd),
-			ssh.WithExtraOptions("IdentitiesOnly=yes"),
-		)
-		if err != nil {
-			return fmt.Errorf("failed to create SSH client: %w", err)
-		}
-		defer sshClient.Close()
+	sshClient, err := ssh.New(a.logger, sshHost,
+		ssh.WithIdentityFile(privateKeyPath),
+		ssh.WithKnownHostsFile(hostKeyPath),
+		ssh.WithProxyCommand(proxyCmd),
+		ssh.WithExtraOptions("IdentitiesOnly=yes"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create SSH client: %w", err)
+	}
+	defer sshClient.Close()
 
-		// Find PIDs for the container IDs
+	// Find PIDs for the container IDs
+	var allPIDs []string
+	if len(containerIDs) > 0 {
 		a.logger.Info().Msg("Finding PIDs for container IDs")
 		pids, err := a.findPIDsForContainers(sshClient, containerIDs)
 		if err != nil {
@@ -180,7 +242,6 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 			Msg("Found PIDs for containers")
 
 		// Flatten all PIDs into a single list for perf
-		allPIDs := []string{}
 		for _, pidList := range pids {
 			allPIDs = append(allPIDs, pidList...)
 		}
@@ -188,46 +249,20 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 		if len(allPIDs) == 0 {
 			return fmt.Errorf("no PIDs found for containers")
 		}
+	}
 
-		// Run perf stat or perf record
-		if mode == "stat" {
-			if err := a.executePerfStat(sshClient, allPIDs, perfEvent, duration); err != nil {
-				return fmt.Errorf("failed to execute perf stat: %w", err)
-			}
-		} else if mode == "profile" {
-			if err := a.executePerfRecord(sshClient, allPIDs, perfEvent, duration); err != nil {
-				return fmt.Errorf("failed to execute perf record: %w", err)
-			}
+	// Run perf stat or perf record
+	if mode == "stat" {
+		if err := a.executePerfStat(sshClient, allPIDs, perfEvent, duration); err != nil {
+			return fmt.Errorf("failed to execute perf stat: %w", err)
 		}
-
-	} else {
-		targetNodeName = nodeName
-
-		// Verify node exists
-		a.logger.Info().
-			Str("node", nodeName).
-			Msg("Verifying node exists")
-
-		nodes, err := k8sClient.GetNodes(execCtx)
-		if err != nil {
-			return fmt.Errorf("failed to list nodes: %w", err)
+	} else if mode == "profile" {
+		if err := a.executePerfRecord(sshClient, allPIDs, perfEvent, duration); err != nil {
+			return fmt.Errorf("failed to execute perf record: %w", err)
 		}
-
-		found := false
-		for _, node := range nodes {
-			if node.Metadata.Name == nodeName {
-				found = true
-				a.logger.Info().
-					Str("node", nodeName).
-					Str("os", node.Status.NodeInfo.OperatingSystem).
-					Str("arch", node.Status.NodeInfo.Architecture).
-					Msg("Found node")
-				break
-			}
-		}
-
-		if !found {
-			return fmt.Errorf("node %s not found in cluster", nodeName)
+	} else if mode == "shell" {
+		if err := a.executeShell(sshClient, allPIDs); err != nil {
+			return fmt.Errorf("failed to execute shell: %w", err)
 		}
 	}
 
@@ -336,7 +371,7 @@ func (a *App) findPIDsForContainers(client *ssh.Client, containerIDs map[string]
 		// Search for processes with this container ID in their cgroup
 		// The cgroup file contains the container ID in various formats depending on the runtime
 		findCmd := fmt.Sprintf("grep -l '%s' /proc/*/cgroup 2>/dev/null | cut -d/ -f3 | sort -u", containerID)
-		output, err := client.RunCommand(findCmd)
+		output, _, err := client.RunCommand(findCmd)
 		if err != nil {
 			a.logger.Warn().
 				Err(err).
@@ -392,19 +427,15 @@ func (a *App) executePerfStat(client *ssh.Client, pids []string, events string, 
 
 	a.logger.Debug().Str("command", perfCmd).Msg("Executing perf stat command")
 
-	stdout, stderr, err := client.RunCommandWithStderr(perfCmd)
+	stdout, stderr, err := client.RunCommand(perfCmd)
 	if err != nil {
 		return fmt.Errorf("perf stat failed: %w", err)
 	}
 
 	// Display the perf stat output (perf stat writes to stderr)
-	output := stderr
-	if output == "" {
-		output = stdout
-	}
-	
+	fmt.Println(stdout)
 	fmt.Println("\nPerf stat output:")
-	fmt.Println(output)
+	fmt.Println(stderr)
 
 	a.logger.Info().Msg("Perf stat completed successfully")
 	return nil
@@ -430,7 +461,7 @@ func (a *App) executePerfRecord(client *ssh.Client, pids []string, event string,
 
 	a.logger.Debug().Str("command", perfCmd).Msg("Executing perf record command")
 
-	output, err := client.RunCommand(perfCmd)
+	output, _, err := client.RunCommand(perfCmd)
 	if err != nil {
 		return fmt.Errorf("perf record failed: %w", err)
 	}
@@ -451,4 +482,19 @@ func (a *App) executePerfRecord(client *ssh.Client, pids []string, event string,
 	}
 
 	return nil
+}
+
+// executeShell opens an interactive SSH shell to the perf pod.
+func (a *App) executeShell(client *ssh.Client, pids []string) error {
+	a.logger.Info().
+		Strs("pids", pids).
+		Msg("Attaching a shell with perf")
+
+	return client.Run(
+		"/bin/bash",
+		ssh.WithStdIn(os.Stdin),
+		ssh.WithStdOut(os.Stdout),
+		ssh.WithStdErr(os.Stderr),
+		ssh.WithTTY(true),
+	)
 }

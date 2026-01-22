@@ -192,6 +192,35 @@ func New() *App {
 					perf.DurationFlag(),
 				},
 			},
+			{
+				Name:   "shell",
+				Usage:  "Open an interactive shell in a privileged pod on the same node as the target pod",
+				Action: app.attachShell,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "context",
+						Usage: "Kubernetes context to use",
+					},
+					&cli.StringFlag{
+						Name:  "pod",
+						Usage: "Pod name to attach to (mutually exclusive with --node)",
+					},
+					&cli.StringFlag{
+						Name:  "node",
+						Usage: "Node name to attach to (mutually exclusive with --pod)",
+					},
+					&cli.StringFlag{
+						Name:    "namespace",
+						Aliases: []string{"n"},
+						Usage:   "Kubernetes namespace (for pods, default: default)",
+					},
+					&cli.StringFlag{
+						Name:  "perf-image",
+						Usage: "Container image for running perf",
+						Value: defaultPerfImage,
+					},
+				},
+			},
 		},
 	})
 	return app
@@ -377,7 +406,7 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 			defer func() {
 				// Clean up the entire base directory (includes working tree and binary)
 				cleanupCmd := fmt.Sprintf("rm -rf %s", remoteBaseDir)
-				if _, err := sshClient.RunCommand(cleanupCmd); err != nil {
+				if _, _, err := sshClient.RunCommand(cleanupCmd); err != nil {
 					a.logger.Warn().Err(err).Str("path", remoteBaseDir).Msg("Failed to clean up remote base directory")
 				} else {
 					a.logger.Debug().Str("path", remoteBaseDir).Msg("Remote base directory cleaned up")
