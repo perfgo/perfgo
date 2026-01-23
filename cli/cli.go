@@ -438,7 +438,7 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 			}
 
 			// Copy back and process perf.data
-			if err := perf.ProcessPerfData(a.logger, sshClient, remoteBaseDir); err != nil {
+			if err := perf.ProcessPerfData(a.logger, sshClient, remoteBaseDir, nil); err != nil {
 				a.logger.Error().Err(err).Msg("Failed to process performance data")
 				finalErr = err
 				return err

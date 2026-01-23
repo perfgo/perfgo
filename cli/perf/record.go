@@ -4,11 +4,14 @@ package perf
 // processing perf data to pprof profiles.
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/perfgo/perfgo/cli/ssh"
@@ -165,7 +168,8 @@ func ParsePerfScript(logger zerolog.Logger, scriptOutput io.Reader) error {
 }
 
 // ProcessPerfData processes perf data from a remote host and creates a pprof profile.
-func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir string) error {
+// It resolves binary paths through /proc/<pid>/root for containerized processes.
+func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir string, pids []string) error {
 	remotePerfData := fmt.Sprintf("%s/perf.data", remoteBaseDir)
 
 	logger.Info().
@@ -187,6 +191,167 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 
 	logger.Info().Str("file", scriptFile).Msg("Performance script output saved")
 
-	// Parse and summarize the perf script output
-	return ParsePerfScript(logger, strings.NewReader(scriptOutput))
+	// Extract unique binary paths from perf script output
+	binaryPaths := extractBinaryPaths(scriptOutput)
+	logger.Info().
+		Int("count", len(binaryPaths)).
+		Msg("Found binaries referenced in profile")
+
+	// Copy binaries from remote host
+	localBinaries := make(map[string]string) // remote path -> local path
+	if len(binaryPaths) > 0 && len(pids) > 0 {
+		logger.Info().Msg("Copying binaries from remote host")
+		
+		// Create binaries directory
+		binDir := "profile-binaries"
+		if err := os.MkdirAll(binDir, 0755); err != nil {
+			return fmt.Errorf("failed to create binaries directory: %w", err)
+		}
+
+		for _, remotePath := range binaryPaths {
+			// Skip special paths like [kernel.kallsyms], [vdso], etc.
+			if strings.HasPrefix(remotePath, "[") {
+				continue
+			}
+
+			// Try to find binary through /proc/<pid>/root for each PID
+			var foundProcPath string
+			var foundPID string
+			for _, pid := range pids {
+				procPath := fmt.Sprintf("/proc/%s/root%s", pid, remotePath)
+				
+				// Check if binary exists via /proc/<pid>/root
+				checkCmd := fmt.Sprintf("test -f %s && echo exists", procPath)
+				output, _, err := sshClient.RunCommand(checkCmd)
+				if err == nil && strings.TrimSpace(output) == "exists" {
+					foundProcPath = procPath
+					foundPID = pid
+					break
+				}
+			}
+
+			if foundProcPath == "" {
+				logger.Debug().
+					Str("path", remotePath).
+					Msg("Binary not found via /proc/pid/root for any PID, skipping")
+				continue
+			}
+
+			// Copy binary to local
+			localPath := filepath.Join(binDir, filepath.Base(remotePath))
+			if err := copyBinaryFromRemote(logger, sshClient, foundProcPath, localPath); err != nil {
+				logger.Warn().
+					Err(err).
+					Str("remote", remotePath).
+					Str("proc_path", foundProcPath).
+					Msg("Failed to copy binary")
+				continue
+			}
+
+			localBinaries[remotePath] = localPath
+			logger.Debug().
+				Str("remote", remotePath).
+				Str("pid", foundPID).
+				Str("proc_path", foundProcPath).
+				Str("local", localPath).
+				Msg("Copied binary")
+		}
+
+		logger.Info().
+			Int("count", len(localBinaries)).
+			Msg("Binaries copied successfully")
+	}
+
+	// Parse and create the profile
+	parser := perfscript.New()
+	prof, err := parser.Parse(strings.NewReader(scriptOutput))
+	if err != nil {
+		return fmt.Errorf("failed to parse perf script: %w", err)
+	}
+
+	// Update binary paths in the profile to point to local copies
+	for _, mapping := range prof.Mapping {
+		if localPath, ok := localBinaries[mapping.File]; ok {
+			mapping.File = localPath
+		}
+	}
+
+	// Write profile to file
+	profileFile := "perf.pb.gz"
+	f, err := os.Create(profileFile)
+	if err != nil {
+		return fmt.Errorf("failed to create profile file: %w", err)
+	}
+	defer f.Close()
+
+	if err := prof.Write(f); err != nil {
+		return fmt.Errorf("failed to write profile: %w", err)
+	}
+
+	logger.Info().
+		Str("profile", profileFile).
+		Str("script", "perf.script").
+		Str("binaries", "profile-binaries/").
+		Int("samples", len(prof.Sample)).
+		Int("functions", len(prof.Function)).
+		Int("locations", len(prof.Location)).
+		Msg("Performance profile created")
+
+	logger.Info().Msgf("View profile with: go tool pprof %s", profileFile)
+
+	return nil
+}
+
+// extractBinaryPaths extracts unique binary paths from perf script output.
+func extractBinaryPaths(scriptOutput string) []string {
+	binarySet := make(map[string]bool)
+	scanner := bufio.NewScanner(strings.NewReader(scriptOutput))
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		// Look for stack frame lines with binary paths: (/path/to/binary)
+		if strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "    ") {
+			parts := strings.Fields(line)
+			for _, part := range parts {
+				if strings.HasPrefix(part, "(") && strings.HasSuffix(part, ")") {
+					binaryPath := strings.TrimSuffix(strings.TrimPrefix(part, "("), ")")
+					if binaryPath != "" {
+						binarySet[binaryPath] = true
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// Convert set to slice
+	binaries := make([]string, 0, len(binarySet))
+	for path := range binarySet {
+		binaries = append(binaries, path)
+	}
+	return binaries
+}
+
+// copyBinaryFromRemote copies a binary from the remote host to local filesystem.
+func copyBinaryFromRemote(logger zerolog.Logger, sshClient *ssh.Client, remotePath, localPath string) error {
+	// Use base64 encoding to transfer the binary
+	// This avoids issues with binary data in SSH output
+	cmd := fmt.Sprintf("base64 %s", remotePath)
+	base64Output, _, err := sshClient.RunCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to read remote binary: %w", err)
+	}
+
+	// Decode base64
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(base64Output))
+	if err != nil {
+		return fmt.Errorf("failed to decode base64: %w", err)
+	}
+
+	// Write to local file
+	if err := os.WriteFile(localPath, data, 0755); err != nil {
+		return fmt.Errorf("failed to write local binary: %w", err)
+	}
+
+	return nil
 }

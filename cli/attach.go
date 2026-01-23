@@ -477,7 +477,7 @@ func (a *App) executePerfRecord(client *ssh.Client, pids []string, event string,
 
 	// Process perf.data and convert to pprof
 	remoteBaseDir := "/tmp"
-	if err := perf.ProcessPerfData(a.logger, client, remoteBaseDir); err != nil {
+	if err := perf.ProcessPerfData(a.logger, client, remoteBaseDir, pids); err != nil {
 		return fmt.Errorf("failed to process performance data: %w", err)
 	}
 
