@@ -7,7 +7,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
+
+	gocmd "github.com/perfgo/perfgo/cli/go"
 )
 
 func (a *App) buildTestBinary(goos, goarch string, extraArgs []string) (string, error) {
@@ -38,7 +39,7 @@ func (a *App) buildTestBinary(goos, goarch string, extraArgs []string) (string, 
 		a.logger.Debug().Strs("extra_args", extraArgs).Msg("Adding extra arguments to go test")
 	}
 
-	cmd := exec.Command("go", args...)
+	cmd := gocmd.Command(args...)
 
 	// Set environment for cross-compilation if needed
 	if goos != "" && goarch != "" {

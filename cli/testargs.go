@@ -6,7 +6,26 @@ package cli
 import (
 	"fmt"
 	"strings"
+
+	gocmd "github.com/perfgo/perfgo/cli/go"
 )
+
+// validateTestPath validates that a Go package path is valid.
+// It uses 'go list' to check if the package pattern is valid and ensures
+// that only a single package matches (not a pattern that matches multiple packages).
+func (a *App) validateTestPath(path string) error {
+	packages, err := gocmd.List(path)
+	if err != nil {
+		return err
+	}
+	
+	// Ensure only one package matches
+	if len(packages) > 1 {
+		return fmt.Errorf("package pattern %q matches multiple packages (%d total), please specify a single package path", path, len(packages))
+	}
+	
+	return nil
+}
 
 func (a *App) getPackagePath(buildArgs []string) string {
 	// Look for package path in build args

@@ -64,6 +64,75 @@ func (a *App) executeRemoteTest(host, controlPath, remotePath string, args []str
 }
 
 func (a *App) executeRemoteTestInDir(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath, perfMode, perfEvent string, args []string, testRun *model.TestRun) error {
+	return a.executeRemoteTestInDirWithOptions(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, perfMode, perfEvent, false, args, testRun)
+}
+
+func (a *App) executeRemoteTestInDirWithStatOptions(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath string, statOpts perf.StatOptions, args []string, testRun *model.TestRun) error {
+	// Construct the full working directory path
+	workDir := remoteDir
+	if packagePath != "." && packagePath != "" {
+		workDir = fmt.Sprintf("%s/%s", remoteDir, packagePath)
+	}
+
+	a.logger.Debug().
+		Str("host", sshClient.Host()).
+		Str("binary", remotePath).
+		Str("sync_dir", remoteDir).
+		Str("work_dir", workDir).
+		Str("package", packagePath).
+		Strs("args", args).
+		Msg("Starting remote test execution with perf stat")
+
+	statOpts.Binary = remotePath
+	statOpts.Args = args
+	perfCmd := perf.BuildStatCommand(statOpts)
+	remoteCmd := fmt.Sprintf("cd %s && %s", workDir, perfCmd)
+
+	a.logger.Info().
+		Strs("events", statOpts.Events).
+		Bool("detail", statOpts.Detail).
+		Msg("Wrapping remote test execution with perf stat")
+
+	// Execute the test binary remotely
+	cmd := exec.Command("ssh",
+		"-o", fmt.Sprintf("ControlPath=%s", sshClient.ControlPath()),
+		"-o", "ControlMaster=no",
+		sshClient.Host(),
+		remoteCmd,
+	)
+
+	// Capture stdout and stderr for history
+	var stdoutBuf, stderrBuf bytes.Buffer
+
+	// Create multi-writers to both capture and display output
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+
+	if err := cmd.Run(); err != nil {
+		// Save captured output to testRun
+		testRun.StdoutFile = stdoutBuf.String()
+		testRun.StderrFile = stderrBuf.String()
+
+		// Test failures are expected to return non-zero exit codes
+		// Check if it's an ExitError (test failed) vs other errors
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			a.logger.Info().
+				Int("exit_code", exitErr.ExitCode()).
+				Msg("Tests completed with failures")
+			return fmt.Errorf("tests failed with exit code %d", exitErr.ExitCode())
+		}
+		return fmt.Errorf("failed to execute remote test: %w", err)
+	}
+
+	// Save captured output to testRun
+	testRun.StdoutFile = stdoutBuf.String()
+	testRun.StderrFile = stderrBuf.String()
+
+	a.logger.Info().Msg("Tests completed successfully")
+	return nil
+}
+
+func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath, perfMode, perfEvent string, perfDetail bool, args []string, testRun *model.TestRun) error {
 	// Construct the full working directory path
 	workDir := remoteDir
 	if packagePath != "." && packagePath != "" {
@@ -109,12 +178,14 @@ func (a *App) executeRemoteTestInDir(sshClient *ssh.Client, remotePath, remoteDi
 			Events: events,
 			Binary: remotePath,
 			Args:   args,
+			Detail: perfDetail,
 		}
 		perfCmd := perf.BuildStatCommand(statOpts)
 		remoteCmd = fmt.Sprintf("cd %s && %s", workDir, perfCmd)
 
 		a.logger.Info().
 			Str("events", perfEvent).
+			Bool("detail", perfDetail).
 			Msg("Wrapping remote test execution with perf stat")
 	} else {
 		// Direct execution without perf

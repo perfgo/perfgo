@@ -5,6 +5,7 @@ go 1.24.0
 toolchain go1.24.6
 
 require (
+	al.essio.dev/pkg/shellescape v1.6.0
 	github.com/google/pprof v0.0.0-20251007162407-5df77e3f7d1d
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.11.1

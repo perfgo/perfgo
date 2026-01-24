@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/perfgo/perfgo/cli/perf"
@@ -76,6 +75,7 @@ func New() *App {
 						Usage: "Keep remote artifacts (don't clean up after test execution)",
 					},
 					perf.StatEventFlag(),
+					perf.StatDetailFlag(),
 				},
 			},
 			{
@@ -153,6 +153,7 @@ func New() *App {
 						Usage:   "Kubernetes namespace (for pods, default: default)",
 					},
 					perf.StatEventFlag(),
+					perf.StatDetailFlag(),
 					&cli.StringFlag{
 						Name:  "perf-image",
 						Usage: "Container image for running perf",
@@ -250,11 +251,13 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 
 	var perfEvent string
 	var perfEvents []string
+	var perfDetail bool
 
 	if perfMode == "profile" {
 		perfEvent = ctx.String("event")
 	} else if perfMode == "stat" {
 		perfEvents = ctx.StringSlice("event")
+		perfDetail = ctx.Bool("detail")
 	}
 
 	// Get additional arguments passed after flags (or after --)
@@ -317,6 +320,21 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 
 	if len(testArgs) > 0 {
 		a.logger.Debug().Strs("args", testArgs).Msg("Additional test arguments")
+	}
+
+	// Validate that the first argument (if present) is a valid path or pattern
+	if len(testArgs) < 1 {
+		return fmt.Errorf("no package path specified: please provide a test path that resolves into a single package (e.g., '.' or './pkg/example')")
+	}
+
+	// the first args, always needs to be the test path
+	if err := a.validateTestPath(testArgs[0]); err != nil {
+		return err
+	}
+
+	// remove -- if given as separator
+	if len(testArgs) > 1 && testArgs[1] == "--" {
+		testArgs = append(testArgs[:1], testArgs[2:]...)
 	}
 
 	// Separate build args from runtime args
@@ -446,7 +464,15 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 
 			// Note: artifacts will be saved after recordTestRun creates the directory
 		} else if perfMode == "stat" {
-			err := a.executeRemoteTestInDir(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, "stat", strings.Join(perfEvents, ","), transformedArgs, testRun)
+			var events []string
+			if len(perfEvents) > 0 {
+				events = perfEvents
+			}
+			statOpts := perf.StatOptions{
+				Events: events,
+				Detail: perfDetail,
+			}
+			err := a.executeRemoteTestInDirWithStatOptions(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, statOpts, transformedArgs, testRun)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Remote test execution failed")
 				finalErr = err
@@ -500,7 +526,15 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 
 			// Note: artifacts will be saved after recordTestRun creates the directory
 		} else if perfMode == "stat" {
-			err := a.executeLocalTest(testBinary, "stat", strings.Join(perfEvents, ","), transformedArgs, testRun)
+			var events []string
+			if len(perfEvents) > 0 {
+				events = perfEvents
+			}
+			statOpts := perf.StatOptions{
+				Events: events,
+				Detail: perfDetail,
+			}
+			err := a.executeLocalTestWithStatOptions(testBinary, statOpts, transformedArgs, testRun)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Local test execution failed")
 				finalErr = err

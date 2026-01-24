@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"al.essio.dev/pkg/shellescape"
 	"github.com/perfgo/perfgo/cli/ssh"
 	"github.com/perfgo/perfgo/perfscript"
 	"github.com/rs/zerolog"
@@ -62,40 +63,19 @@ func BuildRecordArgs(opts RecordOptions) []string {
 }
 
 // BuildRecordCommand builds perf record command string for remote execution.
+// It reuses BuildRecordArgs and joins the arguments with proper shell escaping.
 func BuildRecordCommand(opts RecordOptions) string {
-	cmd := "perf record -g --call-graph fp"
-
-	// Add event
-	if opts.Event != "" {
-		cmd += fmt.Sprintf(" -e %s", opts.Event)
+	args := BuildRecordArgs(opts)
+	
+	// Build command with proper shell escaping
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, "perf")
+	
+	for _, arg := range args {
+		parts = append(parts, shellescape.Quote(arg))
 	}
-
-	// Add output path
-	outputPath := opts.OutputPath
-	if outputPath == "" {
-		outputPath = "perf.data"
-	}
-	cmd += fmt.Sprintf(" -o %s", outputPath)
-
-	// Add PIDs or binary execution
-	if len(opts.PIDs) > 0 {
-		pidList := strings.Join(opts.PIDs, ",")
-		cmd += fmt.Sprintf(" -p %s", pidList)
-
-		// When attaching to PIDs, use sleep for duration
-		cmd += fmt.Sprintf(" sleep %d", opts.Duration)
-	} else if opts.Binary != "" {
-		cmd += " --"
-		cmd += fmt.Sprintf(" %s", opts.Binary)
-
-		// Append arguments with proper shell escaping
-		for _, arg := range opts.Args {
-			escapedArg := strings.ReplaceAll(arg, "'", "'\\''")
-			cmd += fmt.Sprintf(" '%s'", escapedArg)
-		}
-	}
-
-	return cmd
+	
+	return strings.Join(parts, " ")
 }
 
 // ProfileEventFlag returns the event flag for perf record (single event).

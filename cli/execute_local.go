@@ -16,6 +16,57 @@ import (
 )
 
 func (a *App) executeLocalTest(binaryPath, perfMode, perfEvent string, args []string, testRun *model.TestRun) error {
+	return a.executeLocalTestWithOptions(binaryPath, perfMode, perfEvent, false, args, testRun)
+}
+
+func (a *App) executeLocalTestWithStatOptions(binaryPath string, statOpts perf.StatOptions, args []string, testRun *model.TestRun) error {
+	a.logger.Debug().
+		Str("binary", binaryPath).
+		Strs("args", args).
+		Msg("Starting local test execution with perf stat")
+
+	statOpts.Binary = binaryPath
+	statOpts.Args = args
+	perfArgs := perf.BuildStatArgs(statOpts)
+	cmd := exec.Command("perf", perfArgs...)
+
+	a.logger.Info().
+		Strs("events", statOpts.Events).
+		Bool("detail", statOpts.Detail).
+		Msg("Wrapping test execution with perf stat")
+
+	// Capture stdout and stderr for history
+	var stdoutBuf, stderrBuf bytes.Buffer
+
+	// Create multi-writers to both capture and display output
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+
+	if err := cmd.Run(); err != nil {
+		// Save captured output to testRun
+		testRun.StdoutFile = stdoutBuf.String()
+		testRun.StderrFile = stderrBuf.String()
+
+		// Test failures are expected to return non-zero exit codes
+		// Check if it's an ExitError (test failed) vs other errors
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			a.logger.Info().
+				Int("exit_code", exitErr.ExitCode()).
+				Msg("Tests completed with failures")
+			return fmt.Errorf("tests failed with exit code %d", exitErr.ExitCode())
+		}
+		return fmt.Errorf("failed to execute test: %w", err)
+	}
+
+	// Save captured output to testRun
+	testRun.StdoutFile = stdoutBuf.String()
+	testRun.StderrFile = stderrBuf.String()
+
+	a.logger.Info().Msg("Tests completed successfully")
+	return nil
+}
+
+func (a *App) executeLocalTestWithOptions(binaryPath, perfMode, perfEvent string, perfDetail bool, args []string, testRun *model.TestRun) error {
 	a.logger.Debug().
 		Str("binary", binaryPath).
 		Str("perfMode", perfMode).
@@ -49,12 +100,14 @@ func (a *App) executeLocalTest(binaryPath, perfMode, perfEvent string, args []st
 			Events: events,
 			Binary: binaryPath,
 			Args:   args,
+			Detail: perfDetail,
 		}
 		perfArgs := perf.BuildStatArgs(statOpts)
 		cmd = exec.Command("perf", perfArgs...)
 
 		a.logger.Info().
 			Str("events", perfEvent).
+			Bool("detail", perfDetail).
 			Msg("Wrapping test execution with perf stat")
 	} else {
 		// Execute the test binary directly with arguments

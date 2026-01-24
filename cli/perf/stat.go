@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"al.essio.dev/pkg/shellescape"
 	"github.com/urfave/cli/v2"
 )
 
@@ -16,11 +17,17 @@ type StatOptions struct {
 	Duration int      // Duration in seconds (used with sleep)
 	Binary   string   // Binary to execute (mutually exclusive with PIDs)
 	Args     []string // Arguments for the binary
+	Detail   bool     // Add detailed statistics (-d flag)
 }
 
 // BuildStatArgs builds perf stat command arguments for local execution.
 func BuildStatArgs(opts StatOptions) []string {
 	args := []string{"stat"}
+
+	// Add detailed statistics flag
+	if opts.Detail {
+		args = append(args, "-d")
+	}
 
 	// Add events
 	if len(opts.Events) > 0 {
@@ -45,35 +52,19 @@ func BuildStatArgs(opts StatOptions) []string {
 }
 
 // BuildStatCommand builds perf stat command string for remote execution.
+// It reuses BuildStatArgs and joins the arguments with proper shell escaping.
 func BuildStatCommand(opts StatOptions) string {
-	cmd := "perf stat"
-
-	// Add events
-	if len(opts.Events) > 0 {
-		for _, event := range opts.Events {
-			cmd += fmt.Sprintf(" -e %s", strings.TrimSpace(event))
-		}
+	args := BuildStatArgs(opts)
+	
+	// Build command with proper shell escaping
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, "perf")
+	
+	for _, arg := range args {
+		parts = append(parts, shellescape.Quote(arg))
 	}
-
-	// Add PIDs or binary execution
-	if len(opts.PIDs) > 0 {
-		pidList := strings.Join(opts.PIDs, ",")
-		cmd += fmt.Sprintf(" -p %s", pidList)
-
-		// When attaching to PIDs, use sleep for duration
-		cmd += fmt.Sprintf(" sleep %d", opts.Duration)
-	} else if opts.Binary != "" {
-		cmd += " --"
-		cmd += fmt.Sprintf(" %s", opts.Binary)
-
-		// Append arguments with proper shell escaping
-		for _, arg := range opts.Args {
-			escapedArg := strings.ReplaceAll(arg, "'", "'\\''")
-			cmd += fmt.Sprintf(" '%s'", escapedArg)
-		}
-	}
-
-	return cmd
+	
+	return strings.Join(parts, " ")
 }
 
 // StatEventFlag returns the event flag for perf stat (multiple events).
@@ -82,6 +73,15 @@ func StatEventFlag() cli.Flag {
 		Name:    "event",
 		Aliases: []string{"e"},
 		Usage:   "Event to measure (can be specified multiple times)",
+	}
+}
+
+// StatDetailFlag returns the detail flag for perf stat.
+func StatDetailFlag() cli.Flag {
+	return &cli.BoolFlag{
+		Name:  "detail",
+		Usage: "Add detailed statistics (-d flag to perf)",
+		Value: true,
 	}
 }
 

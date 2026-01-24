@@ -42,11 +42,13 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 
 	var perfEvent string
 	var perfEvents []string
+	var perfDetail bool
 	if mode == "profile" {
 		perfEvent = ctx.String("event")
 	} else if mode == "stat" {
 		perfEvents = ctx.StringSlice("event")
 		perfEvent = strings.Join(perfEvents, ",")
+		perfDetail = ctx.Bool("detail")
 	}
 
 	// Validate that exactly one of --pod or --node is specified
@@ -253,7 +255,7 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 
 	// Run perf stat or perf record
 	if mode == "stat" {
-		if err := a.executePerfStat(sshClient, allPIDs, perfEvent, duration); err != nil {
+		if err := a.executePerfStat(sshClient, allPIDs, perfEvents, perfDetail, duration); err != nil {
 			return fmt.Errorf("failed to execute perf stat: %w", err)
 		}
 	} else if mode == "profile" {
@@ -405,23 +407,20 @@ func (a *App) findPIDsForContainers(client *ssh.Client, containerIDs map[string]
 }
 
 // executePerfStat runs perf stat on the specified PIDs via SSH.
-func (a *App) executePerfStat(client *ssh.Client, pids []string, events string, duration int) error {
+func (a *App) executePerfStat(client *ssh.Client, pids []string, events []string, detail bool, duration int) error {
 	a.logger.Info().
 		Strs("pids", pids).
-		Str("events", events).
+		Strs("events", events).
+		Bool("detail", detail).
 		Int("duration", duration).
 		Msg("Running perf stat on PIDs")
 
 	// Build perf stat command
-	var eventList []string
-	if events != "" {
-		eventList = strings.Split(events, ",")
-	}
-
 	statOpts := perf.StatOptions{
-		Events:   eventList,
+		Events:   events,
 		PIDs:     pids,
 		Duration: duration,
+		Detail:   detail,
 	}
 	perfCmd := perf.BuildStatCommand(statOpts)
 
