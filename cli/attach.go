@@ -41,10 +41,12 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 	duration := ctx.Int("duration")
 
 	var perfEvent string
+	var perfCount int
 	var perfEvents []string
 	var perfDetail bool
 	if mode == "profile" {
 		perfEvent = ctx.String("event")
+		perfCount = ctx.Int("count")
 	} else if mode == "stat" {
 		perfEvents = ctx.StringSlice("event")
 		perfEvent = strings.Join(perfEvents, ",")
@@ -259,7 +261,12 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 			return fmt.Errorf("failed to execute perf stat: %w", err)
 		}
 	} else if mode == "profile" {
-		if err := a.executePerfRecord(sshClient, allPIDs, perfEvent, duration); err != nil {
+		recordOpts := &perf.RecordOptions{
+			Event:    perfEvent,
+			Count:    perfCount,
+			Duration: duration,
+		}
+		if err := a.executePerfRecord(sshClient, allPIDs, recordOpts); err != nil {
 			return fmt.Errorf("failed to execute perf record: %w", err)
 		}
 	} else if mode == "shell" {
@@ -441,22 +448,24 @@ func (a *App) executePerfStat(client *ssh.Client, pids []string, events []string
 }
 
 // executePerfRecord runs perf record on the specified PIDs via SSH.
-func (a *App) executePerfRecord(client *ssh.Client, pids []string, event string, duration int) error {
-	a.logger.Info().
+func (a *App) executePerfRecord(client *ssh.Client, pids []string, recordOpts *perf.RecordOptions) error {
+	// Set PIDs and output path
+	recordOpts.PIDs = pids
+	recordOpts.OutputPath = "/tmp/perf.data"
+
+	logEvent := a.logger.Info().
 		Strs("pids", pids).
-		Str("event", event).
-		Int("duration", duration).
-		Msg("Running perf record on PIDs")
+		Int("duration", recordOpts.Duration)
+	if recordOpts.Event != "" {
+		logEvent.Str("event", recordOpts.Event)
+		if recordOpts.Count > 0 {
+			logEvent.Int("count", recordOpts.Count)
+		}
+	}
+	logEvent.Msg("Running perf record on PIDs")
 
 	// Build perf record command
-	perfDataPath := "/tmp/perf.data"
-	recordOpts := perf.RecordOptions{
-		Event:      event,
-		PIDs:       pids,
-		Duration:   duration,
-		OutputPath: perfDataPath,
-	}
-	perfCmd := perf.BuildRecordCommand(recordOpts)
+	perfCmd := perf.BuildRecordCommand(*recordOpts)
 
 	a.logger.Debug().Str("command", perfCmd).Msg("Executing perf record command")
 
@@ -471,7 +480,7 @@ func (a *App) executePerfRecord(client *ssh.Client, pids []string, event string,
 	}
 
 	a.logger.Info().
-		Str("remote_path", perfDataPath).
+		Str("remote_path", recordOpts.OutputPath).
 		Msg("Performance data collected on remote host")
 
 	// Process perf.data and convert to pprof

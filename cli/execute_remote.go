@@ -63,8 +63,8 @@ func (a *App) executeRemoteTest(host, controlPath, remotePath string, args []str
 	return nil
 }
 
-func (a *App) executeRemoteTestInDir(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath, perfMode, perfEvent string, args []string, testRun *model.TestRun) error {
-	return a.executeRemoteTestInDirWithOptions(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, perfMode, perfEvent, false, args, testRun)
+func (a *App) executeRemoteTestInDir(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath string, recordOpts *perf.RecordOptions, args []string, testRun *model.TestRun) error {
+	return a.executeRemoteTestInDirWithOptions(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, recordOpts, args, testRun)
 }
 
 func (a *App) executeRemoteTestInDirWithStatOptions(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath string, statOpts perf.StatOptions, args []string, testRun *model.TestRun) error {
@@ -132,61 +132,50 @@ func (a *App) executeRemoteTestInDirWithStatOptions(sshClient *ssh.Client, remot
 	return nil
 }
 
-func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath, perfMode, perfEvent string, perfDetail bool, args []string, testRun *model.TestRun) error {
+func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath string, recordOpts *perf.RecordOptions, args []string, testRun *model.TestRun) error {
 	// Construct the full working directory path
 	workDir := remoteDir
 	if packagePath != "." && packagePath != "" {
 		workDir = fmt.Sprintf("%s/%s", remoteDir, packagePath)
 	}
 
-	a.logger.Debug().
+	logMsg := a.logger.Debug().
 		Str("host", sshClient.Host()).
 		Str("binary", remotePath).
 		Str("sync_dir", remoteDir).
 		Str("work_dir", workDir).
 		Str("package", packagePath).
-		Str("perfMode", perfMode).
-		Str("perfEvent", perfEvent).
-		Strs("args", args).
-		Msg("Starting remote test execution")
+		Strs("args", args)
+
+	if recordOpts != nil && recordOpts.Event != "" {
+		logMsg.Str("perfEvent", recordOpts.Event)
+		if recordOpts.Count > 0 {
+			logMsg.Int("perfCount", recordOpts.Count)
+		}
+	}
+	logMsg.Msg("Starting remote test execution")
 
 	var remoteCmd string
 
-	if perfMode == "profile" {
+	if recordOpts != nil {
 		// Build perf record command
 		perfDataPath := fmt.Sprintf("%s/perf.data", remoteBaseDir)
-		recordOpts := perf.RecordOptions{
-			Event:      perfEvent,
-			OutputPath: perfDataPath,
-			Binary:     remotePath,
-			Args:       args,
-		}
-		perfCmd := perf.BuildRecordCommand(recordOpts)
+		recordOpts.OutputPath = perfDataPath
+		recordOpts.Binary = remotePath
+		recordOpts.Args = args
+
+		perfCmd := perf.BuildRecordCommand(*recordOpts)
 		remoteCmd = fmt.Sprintf("cd %s && %s", workDir, perfCmd)
 
-		a.logger.Info().
-			Str("event", perfEvent).
-			Str("output", perfDataPath).
-			Msg("Wrapping remote test execution with perf record")
-	} else if perfMode == "stat" {
-		// Build perf stat command
-		var events []string
-		if perfEvent != "" {
-			events = strings.Split(perfEvent, ",")
+		logEvent := a.logger.Info().
+			Str("output", perfDataPath)
+		if recordOpts.Event != "" {
+			logEvent.Str("event", recordOpts.Event)
+			if recordOpts.Count > 0 {
+				logEvent.Int("count", recordOpts.Count)
+			}
 		}
-		statOpts := perf.StatOptions{
-			Events: events,
-			Binary: remotePath,
-			Args:   args,
-			Detail: perfDetail,
-		}
-		perfCmd := perf.BuildStatCommand(statOpts)
-		remoteCmd = fmt.Sprintf("cd %s && %s", workDir, perfCmd)
-
-		a.logger.Info().
-			Str("events", perfEvent).
-			Bool("detail", perfDetail).
-			Msg("Wrapping remote test execution with perf stat")
+		logEvent.Msg("Wrapping remote test execution with perf record")
 	} else {
 		// Direct execution without perf
 		remoteCmd = fmt.Sprintf("cd %s && %s", workDir, remotePath)
@@ -235,7 +224,7 @@ func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePat
 	testRun.StdoutFile = stdoutBuf.String()
 	testRun.StderrFile = stderrBuf.String()
 
-	if perfMode == "profile" {
+	if recordOpts != nil {
 		perfDataPath := fmt.Sprintf("%s/perf.data", remoteBaseDir)
 		a.logger.Info().
 			Str("output", perfDataPath).

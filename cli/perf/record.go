@@ -24,6 +24,7 @@ import (
 // RecordOptions contains options for perf record command.
 type RecordOptions struct {
 	Event      string   // Event to record
+	Count      int      // Event period to sample (e.g., -c 1000000)
 	PIDs       []string // Process IDs to attach to
 	Duration   int      // Duration in seconds (used with sleep)
 	OutputPath string   // Output file path (default: perf.data)
@@ -38,6 +39,11 @@ func BuildRecordArgs(opts RecordOptions) []string {
 	// Add event
 	if opts.Event != "" {
 		args = append(args, "-e", opts.Event)
+
+		// Add count (event period) - only if event is specified
+		if opts.Count > 0 {
+			args = append(args, "-c", fmt.Sprintf("%d", opts.Count))
+		}
 	}
 
 	// Add output path
@@ -83,8 +89,16 @@ func ProfileEventFlag() cli.Flag {
 	return &cli.StringFlag{
 		Name:    "event",
 		Aliases: []string{"e"},
-		Usage:   "Event to record (default: cycles:u)",
-		Value:   "cycles:u",
+		Usage:   "Event to record",
+	}
+}
+
+// ProfileCountFlag returns the count flag for perf record (event period).
+func ProfileCountFlag() cli.Flag {
+	return &cli.IntFlag{
+		Name:    "count",
+		Aliases: []string{"c"},
+		Usage:   "Event period to sample (e.g., sample every N events)",
 	}
 }
 

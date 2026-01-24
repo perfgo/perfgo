@@ -9,14 +9,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 
 	"github.com/perfgo/perfgo/cli/perf"
 	"github.com/perfgo/perfgo/model"
 )
 
-func (a *App) executeLocalTest(binaryPath, perfMode, perfEvent string, args []string, testRun *model.TestRun) error {
-	return a.executeLocalTestWithOptions(binaryPath, perfMode, perfEvent, false, args, testRun)
+func (a *App) executeLocalTest(binaryPath string, recordOpts *perf.RecordOptions, args []string, testRun *model.TestRun) error {
+	return a.executeLocalTestWithOptions(binaryPath, recordOpts, args, testRun)
 }
 
 func (a *App) executeLocalTestWithStatOptions(binaryPath string, statOpts perf.StatOptions, args []string, testRun *model.TestRun) error {
@@ -66,49 +65,38 @@ func (a *App) executeLocalTestWithStatOptions(binaryPath string, statOpts perf.S
 	return nil
 }
 
-func (a *App) executeLocalTestWithOptions(binaryPath, perfMode, perfEvent string, perfDetail bool, args []string, testRun *model.TestRun) error {
-	a.logger.Debug().
+func (a *App) executeLocalTestWithOptions(binaryPath string, recordOpts *perf.RecordOptions, args []string, testRun *model.TestRun) error {
+	logMsg := a.logger.Debug().
 		Str("binary", binaryPath).
-		Str("perfMode", perfMode).
-		Str("perfEvent", perfEvent).
-		Strs("args", args).
-		Msg("Starting local test execution")
+		Strs("args", args)
+
+	if recordOpts != nil && recordOpts.Event != "" {
+		logMsg.Str("perfEvent", recordOpts.Event)
+		if recordOpts.Count > 0 {
+			logMsg.Int("perfCount", recordOpts.Count)
+		}
+	}
+	logMsg.Msg("Starting local test execution")
 
 	var cmd *exec.Cmd
 
-	if perfMode == "profile" {
+	if recordOpts != nil {
 		// Build perf record command
-		recordOpts := perf.RecordOptions{
-			Event:      perfEvent,
-			OutputPath: "perf.data",
-			Binary:     binaryPath,
-			Args:       args,
-		}
-		perfArgs := perf.BuildRecordArgs(recordOpts)
+		recordOpts.OutputPath = "perf.data"
+		recordOpts.Binary = binaryPath
+		recordOpts.Args = args
+
+		perfArgs := perf.BuildRecordArgs(*recordOpts)
 		cmd = exec.Command("perf", perfArgs...)
 
-		a.logger.Info().
-			Str("event", perfEvent).
-			Msg("Wrapping test execution with perf record")
-	} else if perfMode == "stat" {
-		// Build perf stat command
-		var events []string
-		if perfEvent != "" {
-			events = strings.Split(perfEvent, ",")
+		logEvent := a.logger.Info()
+		if recordOpts.Event != "" {
+			logEvent.Str("event", recordOpts.Event)
+			if recordOpts.Count > 0 {
+				logEvent.Int("count", recordOpts.Count)
+			}
 		}
-		statOpts := perf.StatOptions{
-			Events: events,
-			Binary: binaryPath,
-			Args:   args,
-			Detail: perfDetail,
-		}
-		perfArgs := perf.BuildStatArgs(statOpts)
-		cmd = exec.Command("perf", perfArgs...)
-
-		a.logger.Info().
-			Str("events", perfEvent).
-			Bool("detail", perfDetail).
-			Msg("Wrapping test execution with perf stat")
+		logEvent.Msg("Wrapping test execution with perf record")
 	} else {
 		// Execute the test binary directly with arguments
 		cmd = exec.Command(binaryPath, args...)
@@ -141,7 +129,7 @@ func (a *App) executeLocalTestWithOptions(binaryPath, perfMode, perfEvent string
 	testRun.StdoutFile = stdoutBuf.String()
 	testRun.StderrFile = stderrBuf.String()
 
-	if perfMode == "profile" {
+	if recordOpts != nil {
 		a.logger.Info().Str("output", "perf.data").Msg("Performance data collected")
 	}
 

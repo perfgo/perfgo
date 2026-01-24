@@ -92,6 +92,7 @@ func New() *App {
 						Usage: "Keep remote artifacts (don't clean up after test execution)",
 					},
 					perf.ProfileEventFlag(),
+					perf.ProfileCountFlag(),
 				},
 			},
 		},
@@ -185,6 +186,7 @@ func New() *App {
 						Usage:   "Kubernetes namespace (for pods, default: default)",
 					},
 					perf.ProfileEventFlag(),
+					perf.ProfileCountFlag(),
 					&cli.StringFlag{
 						Name:  "perf-image",
 						Usage: "Container image for running perf",
@@ -250,11 +252,13 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 	keepArtifacts := ctx.Bool("keep")
 
 	var perfEvent string
+	var perfCount int
 	var perfEvents []string
 	var perfDetail bool
 
 	if perfMode == "profile" {
 		perfEvent = ctx.String("event")
+		perfCount = ctx.Int("count")
 	} else if perfMode == "stat" {
 		perfEvents = ctx.StringSlice("event")
 		perfDetail = ctx.Bool("detail")
@@ -448,7 +452,11 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 		transformedArgs := a.transformTestFlags(runtimeArgs)
 
 		if perfMode == "profile" {
-			err := a.executeRemoteTestInDir(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, "profile", perfEvent, transformedArgs, testRun)
+			recordOpts := &perf.RecordOptions{
+				Event: perfEvent,
+				Count: perfCount,
+			}
+			err := a.executeRemoteTestInDir(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, recordOpts, transformedArgs, testRun)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Remote test execution failed")
 				finalErr = err
@@ -479,7 +487,7 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 				return err
 			}
 		} else {
-			err := a.executeRemoteTestInDir(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, "", "", transformedArgs, testRun)
+			err := a.executeRemoteTestInDir(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, nil, transformedArgs, testRun)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Remote test execution failed")
 				finalErr = err
@@ -510,7 +518,11 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 		transformedArgs := a.transformTestFlags(runtimeArgs)
 
 		if perfMode == "profile" {
-			err := a.executeLocalTest(testBinary, "profile", perfEvent, transformedArgs, testRun)
+			recordOpts := &perf.RecordOptions{
+				Event: perfEvent,
+				Count: perfCount,
+			}
+			err := a.executeLocalTest(testBinary, recordOpts, transformedArgs, testRun)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Local test execution failed")
 				finalErr = err
@@ -541,7 +553,7 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 				return err
 			}
 		} else {
-			err := a.executeLocalTest(testBinary, "", "", transformedArgs, testRun)
+			err := a.executeLocalTest(testBinary, nil, transformedArgs, testRun)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Local test execution failed")
 				finalErr = err
