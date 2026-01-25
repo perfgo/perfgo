@@ -9,8 +9,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 
+	"al.essio.dev/pkg/shellescape"
 	"github.com/perfgo/perfgo/cli/perf"
 	"github.com/perfgo/perfgo/cli/ssh"
 )
@@ -24,13 +24,11 @@ func (a *App) executeRemoteTest(host, controlPath, remotePath string, args []str
 
 	// Build the remote command with arguments
 	// Need to properly quote the remote path and arguments
-	remoteCmd := remotePath
+	remoteCmd := shellescape.Quote(remotePath)
 	if len(args) > 0 {
 		// Append arguments to the remote command
 		for _, arg := range args {
-			// Simple shell escaping - wrap in single quotes and escape any single quotes
-			escapedArg := strings.ReplaceAll(arg, "'", "'\\''")
-			remoteCmd += fmt.Sprintf(" '%s'", escapedArg)
+			remoteCmd += " " + shellescape.Quote(arg)
 		}
 	}
 
@@ -85,7 +83,7 @@ func (a *App) executeRemoteTestInDirWithStatOptions(sshClient *ssh.Client, remot
 	statOpts.Binary = remotePath
 	statOpts.Args = args
 	perfCmd := perf.BuildStatCommand(statOpts)
-	remoteCmd := fmt.Sprintf("cd %s && %s", workDir, perfCmd)
+	remoteCmd := fmt.Sprintf("cd %s && %s", shellescape.Quote(workDir), perfCmd)
 
 	a.logger.Info().
 		Strs("events", statOpts.Events).
@@ -164,7 +162,7 @@ func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePat
 		recordOpts.Args = args
 
 		perfCmd := perf.BuildRecordCommand(*recordOpts)
-		remoteCmd = fmt.Sprintf("cd %s && %s", workDir, perfCmd)
+		remoteCmd = fmt.Sprintf("cd %s && %s", shellescape.Quote(workDir), perfCmd)
 
 		logEvent := a.logger.Info().
 			Str("output", perfDataPath)
@@ -177,13 +175,12 @@ func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePat
 		logEvent.Msg("Wrapping remote test execution with perf record")
 	} else {
 		// Direct execution without perf
-		remoteCmd = fmt.Sprintf("cd %s && %s", workDir, remotePath)
+		remoteCmd = fmt.Sprintf("cd %s && %s", shellescape.Quote(workDir), shellescape.Quote(remotePath))
 
 		// Append arguments for direct execution
 		if len(args) > 0 {
 			for _, arg := range args {
-				escapedArg := strings.ReplaceAll(arg, "'", "'\\''")
-				remoteCmd += fmt.Sprintf(" '%s'", escapedArg)
+				remoteCmd += " " + shellescape.Quote(arg)
 			}
 		}
 	}

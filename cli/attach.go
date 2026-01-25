@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"al.essio.dev/pkg/shellescape"
 	"github.com/perfgo/perfgo/cli/k8s"
 	"github.com/perfgo/perfgo/cli/perf"
 	"github.com/perfgo/perfgo/cli/ssh"
@@ -472,7 +473,7 @@ func (a *App) findPIDsForContainers(client *ssh.Client, containerIDs map[string]
 
 		// Search for processes with this container ID in their cgroup
 		// The cgroup file contains the container ID in various formats depending on the runtime
-		findCmd := fmt.Sprintf("grep -l '%s' /proc/*/cgroup 2>/dev/null | cut -d/ -f3 | sort -u", containerID)
+		findCmd := fmt.Sprintf("grep -l %s /proc/*/cgroup 2>/dev/null | cut -d/ -f3 | sort -u", shellescape.Quote(containerID))
 		output, _, err := client.RunCommand(findCmd)
 		if err != nil {
 			a.logger.Warn().
