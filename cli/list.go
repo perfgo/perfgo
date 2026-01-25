@@ -1,85 +1,43 @@
 package cli
 
-// This file contains test run history functionality for listing
-// and displaying previous test runs.
+// This file contains the list command for displaying previous test runs.
 
 import (
-	"encoding/json"
 	"fmt"
-	"io/fs"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/perfgo/perfgo/history"
 	"github.com/perfgo/perfgo/model"
 	"github.com/urfave/cli/v2"
 )
-
-type historyEntry struct {
-	history  model.History
-	fullPath string
-}
 
 func (a *App) list(ctx *cli.Context) error {
 	filterPath := ctx.String("path")
 	limit := ctx.Int("limit")
 
-	// Get git repository root
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	output, err := cmd.Output()
+	// Get perfgo root directory
+	perfgoRoot, err := history.GetPerfgoRoot()
 	if err != nil {
-		return fmt.Errorf("not in a git repository: %w", err)
-	}
-	repoRoot := strings.TrimSpace(string(output))
-
-	perfgoRoot := filepath.Join(repoRoot, ".perfgo")
-
-	// Check if .perfgo directory exists
-	if _, err := os.Stat(perfgoRoot); os.IsNotExist(err) {
-		fmt.Println("No test runs found")
-		fmt.Printf("Test runs are saved to %s/history/<timestamp>-<commit>-<id>/\n", perfgoRoot)
-		return nil
+		return err
 	}
 
-	// Collect history entries
-	var historyEntries []historyEntry
-	err = filepath.WalkDir(perfgoRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if d.IsDir() {
-			historyPath := filepath.Join(path, "history.json")
-			if _, err := os.Stat(historyPath); err == nil {
-				history, err := a.parseHistoryJSON(historyPath)
-				if err != nil {
-					a.logger.Warn().Err(err).Str("path", historyPath).Msg("Failed to parse history.json")
-					return nil
-				}
-
-				entry := historyEntry{
-					history:  history,
-					fullPath: path,
-				}
-
-				// Apply path filter if specified
-				if filterPath == "" || strings.Contains(history.WorkDir, filterPath) {
-					historyEntries = append(historyEntries, entry)
-				}
-			}
-		}
-
-		return nil
-	})
-
+	// Load all history entries
+	historyEntries, err := history.LoadEntries(a.logger, perfgoRoot)
 	if err != nil {
-		return fmt.Errorf("failed to walk .perfgo directory: %w", err)
+		return fmt.Errorf("failed to load history: %w", err)
 	}
 
-	if len(historyEntries) == 0 {
+	// Apply path filter if specified
+	var filteredEntries []history.Entry
+	for _, entry := range historyEntries {
+		if filterPath == "" || strings.Contains(entry.History.WorkDir, filterPath) {
+			filteredEntries = append(filteredEntries, entry)
+		}
+	}
+
+	if len(filteredEntries) == 0 {
 		if filterPath != "" {
 			fmt.Printf("No history entries found matching path: %s\n", filterPath)
 		} else {
@@ -89,20 +47,20 @@ func (a *App) list(ctx *cli.Context) error {
 	}
 
 	// Sort by timestamp (newest first)
-	sort.Slice(historyEntries, func(i, j int) bool {
-		return historyEntries[i].history.Timestamp.After(historyEntries[j].history.Timestamp)
+	sort.Slice(filteredEntries, func(i, j int) bool {
+		return filteredEntries[i].History.Timestamp.After(filteredEntries[j].History.Timestamp)
 	})
 
 	// Apply limit
-	displayRuns := historyEntries
+	displayRuns := filteredEntries
 	if limit > 0 && limit < len(displayRuns) {
 		displayRuns = displayRuns[:limit]
 	}
 
-	fmt.Printf("\n=== History (%d total) ===\n\n", len(historyEntries))
+	fmt.Printf("\n=== History (%d total) ===\n\n", len(filteredEntries))
 
 	for _, entry := range displayRuns {
-		tr := entry.history
+		tr := entry.History
 		timestamp := tr.Timestamp.Format("2006-01-02 15:04:05")
 
 		// Format duration
@@ -175,7 +133,7 @@ func (a *App) list(ctx *cli.Context) error {
 				}
 			}
 		}
-		fmt.Printf("   %s\n", entry.fullPath)
+		fmt.Printf("   %s\n", entry.FullPath)
 		fmt.Println()
 	}
 
@@ -183,18 +141,4 @@ func (a *App) list(ctx *cli.Context) error {
 	fmt.Println("View profile: go tool pprof <path>/perf.pb.gz")
 
 	return nil
-}
-
-func (a *App) parseHistoryJSON(historyPath string) (model.History, error) {
-	data, err := os.ReadFile(historyPath)
-	if err != nil {
-		return model.History{}, err
-	}
-
-	var history model.History
-	if err := json.Unmarshal(data, &history); err != nil {
-		return model.History{}, err
-	}
-
-	return history, nil
 }

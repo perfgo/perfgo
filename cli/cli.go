@@ -145,6 +145,32 @@ func New() *App {
 		},
 	})
 	app.cli.Commands = append(app.cli.Commands, &cli.Command{
+		Name:              "view",
+		Usage:             "View test results from history",
+		ArgsUsage:         "[ID|INDEX]",
+		Action:            app.view,
+		SkipFlagParsing:   true,
+		Description: `View test results from history.
+
+Arguments:
+  0           View last test run (default)
+  -1          View 2nd last test run
+  -2          View 3rd last test run
+  <hex-id>    View test run matching the hex ID prefix
+
+Examples:
+  perfgo view           # View last test run
+  perfgo view -1        # View 2nd last test run
+  perfgo view -2        # View 3rd last test run
+  perfgo view abc123    # View test run with ID starting with abc123
+
+Display Priority:
+  1. Protobuf profiles (perf.pb.gz)
+  2. Perf stat outputs
+  3. Test stdout/stderr
+  4. Binaries (not displayed, only listed)`,
+	})
+	app.cli.Commands = append(app.cli.Commands, &cli.Command{
 		Name:  "attach",
 		Usage: "Attach performance profiling to Kubernetes pods or nodes",
 		Subcommands: []*cli.Command{
@@ -503,8 +529,7 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 
 			// Copy back and process perf.data
 			profilePath := filepath.Join(runDir, "perf.pb.gz")
-			binDir := filepath.Join(runDir, "profile-binaries")
-			binaryArtifacts, err := perf.ProcessPerfData(a.logger, sshClient, remoteBaseDir, profilePath, binDir, nil)
+			binaryArtifacts, err := perf.ProcessPerfData(a.logger, sshClient, remoteBaseDir, profilePath, runDir, nil)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Failed to process performance data")
 				finalErr = err
@@ -601,10 +626,20 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 
 			// Process perf.data
 			profilePath := filepath.Join(runDir, "perf.pb.gz")
-			if err := perf.ConvertPerfToPprof(a.logger, "perf.data", profilePath); err != nil {
+			binaryArtifacts, err := perf.ConvertPerfToPprof(a.logger, "perf.data", profilePath, runDir)
+			if err != nil {
 				a.logger.Error().Err(err).Msg("Failed to convert performance data to pprof")
 				finalErr = err
 				return err
+			}
+
+			// Register binary artifacts
+			for _, binArtifact := range binaryArtifacts {
+				history.Artifacts = append(history.Artifacts, model.Artifact{
+					Type: model.ArtifactTypeTestBinary,
+					Size: binArtifact.Size,
+					File: binArtifact.LocalPath,
+				})
 			}
 
 			// Profile is written directly to history directory
