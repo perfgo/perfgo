@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,31 +14,6 @@ import (
 	"github.com/google/pprof/profile"
 	"github.com/perfgo/perfgo/model"
 )
-
-func (a *App) copyFile(src, dst string) error {
-	sourceFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer sourceFile.Close()
-
-	destFile, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer destFile.Close()
-
-	if _, err := io.Copy(destFile, sourceFile); err != nil {
-		return err
-	}
-
-	// Copy file permissions
-	sourceInfo, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	return os.Chmod(dst, sourceInfo.Mode())
-}
 
 func (a *App) rewriteProfilePaths(profileFile, runDir, destBinary, originalBasename string) error {
 	// Read the profile

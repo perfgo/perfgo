@@ -15,51 +15,6 @@ import (
 	"github.com/perfgo/perfgo/cli/ssh"
 )
 
-func (a *App) executeRemoteTest(host, controlPath, remotePath string, args []string) error {
-	a.logger.Debug().
-		Str("host", host).
-		Str("binary", remotePath).
-		Strs("args", args).
-		Msg("Starting remote test execution")
-
-	// Build the remote command with arguments
-	// Need to properly quote the remote path and arguments
-	remoteCmd := shellescape.Quote(remotePath)
-	if len(args) > 0 {
-		// Append arguments to the remote command
-		for _, arg := range args {
-			remoteCmd += " " + shellescape.Quote(arg)
-		}
-	}
-
-	// Execute the test binary remotely
-	cmd := exec.Command("ssh",
-		"-o", fmt.Sprintf("ControlPath=%s", controlPath),
-		"-o", "ControlMaster=no",
-		host,
-		remoteCmd,
-	)
-
-	// Connect stdout and stderr to display test output in real-time
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		// Test failures are expected to return non-zero exit codes
-		// Check if it's an ExitError (test failed) vs other errors
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			a.logger.Info().
-				Int("exit_code", exitErr.ExitCode()).
-				Msg("Tests completed with failures")
-			return fmt.Errorf("tests failed with exit code %d", exitErr.ExitCode())
-		}
-		return fmt.Errorf("failed to execute remote test: %w", err)
-	}
-
-	a.logger.Info().Msg("Tests completed successfully")
-	return nil
-}
-
 func (a *App) executeRemoteTestInDir(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath string, recordOpts *perf.RecordOptions, args []string, stdout, stderr *string) error {
 	return a.executeRemoteTestInDirWithOptions(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, recordOpts, args, stdout, stderr)
 }

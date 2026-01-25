@@ -14,12 +14,11 @@ import (
 // Parser parses perf script output
 type Parser struct {
 	// Internal state for building the profile
-	profile    *profile.Profile
-	functions  map[string]*profile.Function
-	locations  map[string]*profile.Location
-	mappings   map[string]*profile.Mapping
-	nextID     uint64
-	sampleType string
+	profile   *profile.Profile
+	functions map[string]*profile.Function
+	locations map[string]*profile.Location
+	mappings  map[string]*profile.Mapping
+	nextID    uint64
 }
 
 // New creates a new parser instance
@@ -65,8 +64,6 @@ func (p *Parser) Parse(reader io.Reader) (*profile.Profile, error) {
 
 			// Start new stack
 			currentStack = nil
-			currentEventType = ""
-			currentCount = 0
 
 			// Extract event type
 			parts := strings.Fields(line)

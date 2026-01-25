@@ -524,7 +524,9 @@ func getRemoteBinaryHash(logger zerolog.Logger, sshClient *ssh.Client, remotePat
 	// Convert hex to bytes
 	hashBytes := make([]byte, 32)
 	for i := 0; i < 32; i++ {
-		fmt.Sscanf(hexHash[i*2:i*2+2], "%02x", &hashBytes[i])
+		if _, err := fmt.Sscanf(hexHash[i*2:i*2+2], "%02x", &hashBytes[i]); err != nil {
+			return "", 0, fmt.Errorf("failed to parse hash byte %d: %w", i, err)
+		}
 	}
 
 	// Encode as base32
