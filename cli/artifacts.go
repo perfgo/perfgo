@@ -87,9 +87,7 @@ func (a *App) rewriteProfilePaths(profileFile, runDir, destBinary string) error 
 	return nil
 }
 
-func (a *App) saveArtifacts(runDir string, testRun *model.TestRun, testBinaryPath string) error {
-	cwd, _ := os.Getwd()
-
+func (a *App) saveArtifacts(runDir string, history *model.History, testBinaryPath string) error {
 	// Save the test binary if provided
 	if testBinaryPath != "" {
 		if info, err := os.Stat(testBinaryPath); err == nil && !info.IsDir() {
@@ -97,7 +95,7 @@ func (a *App) saveArtifacts(runDir string, testRun *model.TestRun, testBinaryPat
 			if err := a.copyFile(testBinaryPath, destBinary); err != nil {
 				a.logger.Warn().Err(err).Str("file", testBinaryPath).Msg("Failed to copy test binary")
 			} else {
-				testRun.Artifacts = append(testRun.Artifacts, model.Artifact{
+				history.Artifacts = append(history.Artifacts, model.Artifact{
 					Type: model.ArtifactTypeTestBinary,
 					Size: uint64(info.Size()),
 					File: filepath.Base(testBinaryPath),
@@ -107,14 +105,12 @@ func (a *App) saveArtifacts(runDir string, testRun *model.TestRun, testBinaryPat
 		}
 	}
 
-	// Save perf.pb.gz profile if it exists
-	profileFile := filepath.Join(cwd, "perf.pb.gz")
+	// Register perf.pb.gz profile if it exists (written directly to runDir)
+	profileFile := filepath.Join(runDir, "perf.pb.gz")
 	if info, err := os.Stat(profileFile); err == nil {
-		destProfile := filepath.Join(runDir, "perf.pb.gz")
-
 		// Find the test binary to rewrite paths
 		var destBinary string
-		for _, artifact := range testRun.Artifacts {
+		for _, artifact := range history.Artifacts {
 			if artifact.Type == model.ArtifactTypeTestBinary {
 				destBinary = filepath.Join(runDir, artifact.File)
 				break
@@ -124,25 +120,16 @@ func (a *App) saveArtifacts(runDir string, testRun *model.TestRun, testBinaryPat
 		if destBinary != "" {
 			// Rewrite profile paths to point to saved binary
 			if err := a.rewriteProfilePaths(profileFile, runDir, destBinary); err != nil {
-				a.logger.Warn().Err(err).Msg("Failed to rewrite profile paths, copying original")
-				// Fall back to copying original
-				if err := a.copyFile(profileFile, destProfile); err != nil {
-					return fmt.Errorf("failed to copy profile: %w", err)
-				}
-			}
-		} else {
-			// No binary found, just copy the profile
-			if err := a.copyFile(profileFile, destProfile); err != nil {
-				return fmt.Errorf("failed to copy profile: %w", err)
+				a.logger.Warn().Err(err).Msg("Failed to rewrite profile paths, using original")
 			}
 		}
 
-		testRun.Artifacts = append(testRun.Artifacts, model.Artifact{
+		history.Artifacts = append(history.Artifacts, model.Artifact{
 			Type: model.ArtifactTypePprofProfile,
 			Size: uint64(info.Size()),
 			File: "perf.pb.gz",
 		})
-		a.logger.Debug().Str("dest", destProfile).Msg("Saved pprof profile")
+		a.logger.Debug().Str("profile", profileFile).Msg("Registered pprof profile artifact")
 	}
 
 	return nil

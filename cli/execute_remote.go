@@ -13,7 +13,6 @@ import (
 
 	"github.com/perfgo/perfgo/cli/perf"
 	"github.com/perfgo/perfgo/cli/ssh"
-	"github.com/perfgo/perfgo/model"
 )
 
 func (a *App) executeRemoteTest(host, controlPath, remotePath string, args []string) error {
@@ -63,11 +62,11 @@ func (a *App) executeRemoteTest(host, controlPath, remotePath string, args []str
 	return nil
 }
 
-func (a *App) executeRemoteTestInDir(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath string, recordOpts *perf.RecordOptions, args []string, testRun *model.TestRun) error {
-	return a.executeRemoteTestInDirWithOptions(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, recordOpts, args, testRun)
+func (a *App) executeRemoteTestInDir(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath string, recordOpts *perf.RecordOptions, args []string, stdout, stderr *string) error {
+	return a.executeRemoteTestInDirWithOptions(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, recordOpts, args, stdout, stderr)
 }
 
-func (a *App) executeRemoteTestInDirWithStatOptions(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath string, statOpts perf.StatOptions, args []string, testRun *model.TestRun) error {
+func (a *App) executeRemoteTestInDirWithStatOptions(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath string, statOpts perf.StatOptions, args []string, stdout, stderr *string) error {
 	// Construct the full working directory path
 	workDir := remoteDir
 	if packagePath != "." && packagePath != "" {
@@ -109,9 +108,9 @@ func (a *App) executeRemoteTestInDirWithStatOptions(sshClient *ssh.Client, remot
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
 	if err := cmd.Run(); err != nil {
-		// Save captured output to testRun
-		testRun.StdoutFile = stdoutBuf.String()
-		testRun.StderrFile = stderrBuf.String()
+		// Save captured output
+		*stdout = stdoutBuf.String()
+		*stderr = stderrBuf.String()
 
 		// Test failures are expected to return non-zero exit codes
 		// Check if it's an ExitError (test failed) vs other errors
@@ -124,15 +123,15 @@ func (a *App) executeRemoteTestInDirWithStatOptions(sshClient *ssh.Client, remot
 		return fmt.Errorf("failed to execute remote test: %w", err)
 	}
 
-	// Save captured output to testRun
-	testRun.StdoutFile = stdoutBuf.String()
-	testRun.StderrFile = stderrBuf.String()
+	// Save captured output
+	*stdout = stdoutBuf.String()
+	*stderr = stderrBuf.String()
 
 	a.logger.Info().Msg("Tests completed successfully")
 	return nil
 }
 
-func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath string, recordOpts *perf.RecordOptions, args []string, testRun *model.TestRun) error {
+func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath string, recordOpts *perf.RecordOptions, args []string, stdout, stderr *string) error {
 	// Construct the full working directory path
 	workDir := remoteDir
 	if packagePath != "." && packagePath != "" {
@@ -205,9 +204,9 @@ func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePat
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
 	if err := cmd.Run(); err != nil {
-		// Save captured output to testRun
-		testRun.StdoutFile = stdoutBuf.String()
-		testRun.StderrFile = stderrBuf.String()
+		// Save captured output
+		*stdout = stdoutBuf.String()
+		*stderr = stderrBuf.String()
 
 		// Test failures are expected to return non-zero exit codes
 		// Check if it's an ExitError (test failed) vs other errors
@@ -220,9 +219,9 @@ func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePat
 		return fmt.Errorf("failed to execute remote test: %w", err)
 	}
 
-	// Save captured output to testRun
-	testRun.StdoutFile = stdoutBuf.String()
-	testRun.StderrFile = stderrBuf.String()
+	// Save captured output
+	*stdout = stdoutBuf.String()
+	*stderr = stderrBuf.String()
 
 	if recordOpts != nil {
 		perfDataPath := fmt.Sprintf("%s/perf.data", remoteBaseDir)

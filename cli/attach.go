@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/perfgo/perfgo/cli/k8s"
 	"github.com/perfgo/perfgo/cli/perf"
 	"github.com/perfgo/perfgo/cli/ssh"
+	"github.com/perfgo/perfgo/model"
 	"github.com/urfave/cli/v2"
 )
 
@@ -32,6 +34,15 @@ func (a *App) attachShell(ctx *cli.Context) error {
 }
 
 func (a *App) runAttach(ctx *cli.Context, mode string) error {
+	startTime := time.Now()
+
+	// Generate unique run ID
+	idBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err != nil {
+		return fmt.Errorf("failed to generate run ID: %w", err)
+	}
+	runID := hex.EncodeToString(idBytes)
+
 	// Get flags
 	kubeContext := ctx.String("context")
 	podName := ctx.String("pod")
@@ -52,6 +63,60 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 		perfEvent = strings.Join(perfEvents, ",")
 		perfDetail = ctx.Bool("detail")
 	}
+
+	// Prepare history recording
+	history := &model.History{
+		ID:        runID,
+		Type:      model.HistoryTypeAttach,
+		Timestamp: startTime,
+		Args:      os.Args,
+		Attach: &model.AttachRun{
+			KubeContext: kubeContext,
+			Namespace:   namespace,
+		},
+	}
+
+	// Capture working directory
+	if cwd, err := os.Getwd(); err == nil {
+		history.WorkDir = cwd
+	}
+
+	// Capture git info (non-fatal if it fails)
+	if commit, branch, err := a.getGitInfo(); err == nil {
+		history.Git = &model.Git{
+			Commit: commit,
+			Branch: branch,
+		}
+	}
+
+	// Create history directory early so artifacts can be written directly to it
+	runDir, err := a.prepareHistoryDir(history)
+	if err != nil {
+		return fmt.Errorf("failed to prepare history directory: %w", err)
+	}
+
+	// Track stdout and stderr content
+	var stdoutContent, stderrContent string
+
+	// Track final exit code
+	var finalErr error
+	defer func() {
+		history.Duration = time.Since(startTime)
+		if finalErr != nil {
+			if exitErr, ok := finalErr.(*exec.ExitError); ok {
+				history.ExitCode = exitErr.ExitCode()
+			} else {
+				history.ExitCode = 1
+			}
+		} else {
+			history.ExitCode = 0
+		}
+
+		// Record the history (non-fatal if it fails)
+		if err := a.recordHistory(history, runDir, "", stdoutContent, stderrContent); err != nil {
+			a.logger.Warn().Err(err).Msg("Failed to record history")
+		}
+	}()
 
 	// Validate that exactly one of --pod or --node is specified
 	if podName == "" && nodeName == "" {
@@ -107,10 +172,13 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 
 		pod, err := k8sClient.GetPod(execCtx, podName)
 		if err != nil {
-			return fmt.Errorf("failed to get pod: %w", err)
+			finalErr = fmt.Errorf("failed to get pod: %w", err)
+			return finalErr
 		}
 
 		nodeName = pod.Spec.NodeName
+		history.Attach.PodName = podName
+		history.Attach.NodeName = nodeName
 
 		a.logger.Info().
 			Str("pod", podName).
@@ -129,6 +197,7 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 		}
 		perfPodName = fmt.Sprintf("perfgo-%s-%s", podName, randomSuffix)
 	} else {
+		history.Attach.NodeName = nodeName
 		perfPodName = fmt.Sprintf("perfgo-%s-%s", nodeName, randomSuffix)
 	}
 
@@ -257,8 +326,19 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 
 	// Run perf stat or perf record
 	if mode == "stat" {
-		if err := a.executePerfStat(sshClient, allPIDs, perfEvents, perfDetail, duration); err != nil {
-			return fmt.Errorf("failed to execute perf stat: %w", err)
+		// Store perf options in history
+		history.Perf = &model.Perf{
+			Stat: &model.PerfStat{
+				Events:   perfEvents,
+				PIDs:     allPIDs,
+				Duration: duration,
+				Detail:   perfDetail,
+			},
+		}
+
+		if err := a.executePerfStat(sshClient, allPIDs, perfEvents, perfDetail, duration, &stdoutContent, &stderrContent); err != nil {
+			finalErr = fmt.Errorf("failed to execute perf stat: %w", err)
+			return finalErr
 		}
 	} else if mode == "profile" {
 		recordOpts := &perf.RecordOptions{
@@ -266,12 +346,25 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 			Count:    perfCount,
 			Duration: duration,
 		}
-		if err := a.executePerfRecord(sshClient, allPIDs, recordOpts); err != nil {
-			return fmt.Errorf("failed to execute perf record: %w", err)
+
+		// Store perf options in history
+		history.Perf = &model.Perf{
+			Record: &model.PerfRecord{
+				Event:    perfEvent,
+				Count:    perfCount,
+				PIDs:     allPIDs,
+				Duration: duration,
+			},
+		}
+
+		if err := a.executePerfRecord(sshClient, allPIDs, recordOpts, runDir, history); err != nil {
+			finalErr = fmt.Errorf("failed to execute perf record: %w", err)
+			return finalErr
 		}
 	} else if mode == "shell" {
 		if err := a.executeShell(sshClient, allPIDs); err != nil {
-			return fmt.Errorf("failed to execute shell: %w", err)
+			finalErr = fmt.Errorf("failed to execute shell: %w", err)
+			return finalErr
 		}
 	}
 
@@ -414,7 +507,7 @@ func (a *App) findPIDsForContainers(client *ssh.Client, containerIDs map[string]
 }
 
 // executePerfStat runs perf stat on the specified PIDs via SSH.
-func (a *App) executePerfStat(client *ssh.Client, pids []string, events []string, detail bool, duration int) error {
+func (a *App) executePerfStat(client *ssh.Client, pids []string, events []string, detail bool, duration int, stdout, stderr *string) error {
 	a.logger.Info().
 		Strs("pids", pids).
 		Strs("events", events).
@@ -433,22 +526,26 @@ func (a *App) executePerfStat(client *ssh.Client, pids []string, events []string
 
 	a.logger.Debug().Str("command", perfCmd).Msg("Executing perf stat command")
 
-	stdout, stderr, err := client.RunCommand(perfCmd)
+	stdoutStr, stderrStr, err := client.RunCommand(perfCmd)
 	if err != nil {
 		return fmt.Errorf("perf stat failed: %w", err)
 	}
 
+	// Save captured output
+	*stdout = stdoutStr
+	*stderr = stderrStr
+
 	// Display the perf stat output (perf stat writes to stderr)
-	fmt.Println(stdout)
+	fmt.Println(stdoutStr)
 	fmt.Println("\nPerf stat output:")
-	fmt.Println(stderr)
+	fmt.Println(stderrStr)
 
 	a.logger.Info().Msg("Perf stat completed successfully")
 	return nil
 }
 
 // executePerfRecord runs perf record on the specified PIDs via SSH.
-func (a *App) executePerfRecord(client *ssh.Client, pids []string, recordOpts *perf.RecordOptions) error {
+func (a *App) executePerfRecord(client *ssh.Client, pids []string, recordOpts *perf.RecordOptions, runDir string, history *model.History) error {
 	// Set PIDs and output path
 	recordOpts.PIDs = pids
 	recordOpts.OutputPath = "/tmp/perf.data"
@@ -485,8 +582,24 @@ func (a *App) executePerfRecord(client *ssh.Client, pids []string, recordOpts *p
 
 	// Process perf.data and convert to pprof
 	remoteBaseDir := "/tmp"
-	if err := perf.ProcessPerfData(a.logger, client, remoteBaseDir, pids); err != nil {
+	profilePath := filepath.Join(runDir, "perf.pb.gz")
+	binDir := filepath.Join(runDir, "profile-binaries")
+	binaryArtifacts, err := perf.ProcessPerfData(a.logger, client, remoteBaseDir, profilePath, binDir, pids)
+	if err != nil {
 		return fmt.Errorf("failed to process performance data: %w", err)
+	}
+
+	// Register binary artifacts
+	for _, binArtifact := range binaryArtifacts {
+		history.Artifacts = append(history.Artifacts, model.Artifact{
+			Type: model.ArtifactTypeAttachBinary,
+			Size: binArtifact.Size,
+			File: binArtifact.LocalPath,
+		})
+		a.logger.Debug().
+			Str("remote", binArtifact.RemotePath).
+			Str("local", binArtifact.LocalPath).
+			Msg("Registered binary artifact")
 	}
 
 	return nil

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -27,6 +28,9 @@ type App struct {
 
 func New() *App {
 
+	// Set default log level to info
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+
 	logger :=
 		log.Output(zerolog.ConsoleWriter{
 			Out:        os.Stderr,
@@ -39,6 +43,19 @@ func New() *App {
 			Name: AppName,
 			Authors: []*cli.Author{
 				{Name: "Christian Simon", Email: fmt.Sprintf("simon+%s@swine.de", AppName)},
+			},
+			Flags: []cli.Flag{
+				&cli.BoolFlag{
+					Name:    "verbose",
+					Aliases: []string{"v"},
+					Usage:   "Enable verbose (debug) logging",
+				},
+			},
+			Before: func(ctx *cli.Context) error {
+				if ctx.Bool("verbose") {
+					zerolog.SetGlobalLevel(zerolog.DebugLevel)
+				}
+				return nil
 			},
 		},
 	}
@@ -274,44 +291,56 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 	}
 	runID := hex.EncodeToString(idBytes)
 
-	// Prepare test run recording
-	testRun := &model.TestRun{
+	// Prepare history recording
+	history := &model.History{
 		ID:        runID,
+		Type:      model.HistoryTypeTest,
 		Timestamp: startTime,
 		Args:      os.Args,
+		Test:      &model.TestRun{},
 	}
 
 	// Track test binary path for artifact saving
 	var testBinaryPath string
+	// Track stdout and stderr content
+	var stdoutContent, stderrContent string
 
 	// Capture working directory
 	if cwd, err := os.Getwd(); err == nil {
-		testRun.WorkDir = cwd
+		history.WorkDir = cwd
 	}
 
 	// Capture git info (non-fatal if it fails)
 	if commit, branch, err := a.getGitInfo(); err == nil {
-		testRun.Commit = commit
-		testRun.Branch = branch
+		history.Git = &model.Git{
+			Commit: commit,
+			Branch: branch,
+		}
+	}
+
+	// Create history directory early so artifacts can be written directly to it
+	runDir, err := a.prepareHistoryDir(history)
+	if err != nil {
+		return fmt.Errorf("failed to prepare history directory: %w", err)
 	}
 
 	// Track final exit code
 	var finalErr error
 	defer func() {
-		testRun.Duration = time.Since(startTime)
+		history.Duration = time.Since(startTime)
 		if finalErr != nil {
 			if exitErr, ok := finalErr.(*exec.ExitError); ok {
-				testRun.ExitCode = exitErr.ExitCode()
+				history.ExitCode = exitErr.ExitCode()
 			} else {
-				testRun.ExitCode = 1
+				history.ExitCode = 1
 			}
 		} else {
-			testRun.ExitCode = 0
+			history.ExitCode = 0
 		}
 
-		// Record the test run (non-fatal if it fails)
-		if err := a.recordTestRun(testRun, testBinaryPath); err != nil {
-			a.logger.Warn().Err(err).Msg("Failed to record test run")
+		// Record the history (non-fatal if it fails)
+		if err := a.recordHistory(history, runDir, testBinaryPath, stdoutContent, stderrContent); err != nil {
+			a.logger.Warn().Err(err).Msg("Failed to record history")
 		}
 
 		// Clean up test binary after recording
@@ -354,9 +383,6 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 	if remoteHost != "" {
 		a.logger.Info().Str("host", remoteHost).Msg("Connecting to remote host")
 
-		// Store remote host information
-		testRun.RemoteHost = remoteHost
-
 		// Create SSH client for remote operations
 		sshClient, err := ssh.New(a.logger, remoteHost)
 		if err != nil {
@@ -371,9 +397,12 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 			return err
 		}
 
-		// Store OS and architecture information
-		testRun.OS = remoteOS
-		testRun.Arch = remoteArch
+		// Store target information
+		history.Target = &model.Target{
+			RemoteHost: remoteHost,
+			OS:         remoteOS,
+			Arch:       remoteArch,
+		}
 
 		a.logger.Info().
 			Str("os", remoteOS).
@@ -456,7 +485,16 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 				Event: perfEvent,
 				Count: perfCount,
 			}
-			err := a.executeRemoteTestInDir(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, recordOpts, transformedArgs, testRun)
+
+			// Store perf options in history
+			history.Perf = &model.Perf{
+				Record: &model.PerfRecord{
+					Event: perfEvent,
+					Count: perfCount,
+				},
+			}
+
+			err := a.executeRemoteTestInDir(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, recordOpts, transformedArgs, &stdoutContent, &stderrContent)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Remote test execution failed")
 				finalErr = err
@@ -464,13 +502,25 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 			}
 
 			// Copy back and process perf.data
-			if err := perf.ProcessPerfData(a.logger, sshClient, remoteBaseDir, nil); err != nil {
+			profilePath := filepath.Join(runDir, "perf.pb.gz")
+			binDir := filepath.Join(runDir, "profile-binaries")
+			binaryArtifacts, err := perf.ProcessPerfData(a.logger, sshClient, remoteBaseDir, profilePath, binDir, nil)
+			if err != nil {
 				a.logger.Error().Err(err).Msg("Failed to process performance data")
 				finalErr = err
 				return err
 			}
 
-			// Note: artifacts will be saved after recordTestRun creates the directory
+			// Register binary artifacts
+			for _, binArtifact := range binaryArtifacts {
+				history.Artifacts = append(history.Artifacts, model.Artifact{
+					Type: model.ArtifactTypeTestBinary,
+					Size: binArtifact.Size,
+					File: binArtifact.LocalPath,
+				})
+			}
+
+			// Profile is written directly to history directory
 		} else if perfMode == "stat" {
 			var events []string
 			if len(perfEvents) > 0 {
@@ -480,14 +530,23 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 				Events: events,
 				Detail: perfDetail,
 			}
-			err := a.executeRemoteTestInDirWithStatOptions(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, statOpts, transformedArgs, testRun)
+
+			// Store perf options in history
+			history.Perf = &model.Perf{
+				Stat: &model.PerfStat{
+					Events: events,
+					Detail: perfDetail,
+				},
+			}
+
+			err := a.executeRemoteTestInDirWithStatOptions(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, statOpts, transformedArgs, &stdoutContent, &stderrContent)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Remote test execution failed")
 				finalErr = err
 				return err
 			}
 		} else {
-			err := a.executeRemoteTestInDir(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, nil, transformedArgs, testRun)
+			err := a.executeRemoteTestInDir(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, nil, transformedArgs, &stdoutContent, &stderrContent)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Remote test execution failed")
 				finalErr = err
@@ -499,8 +558,10 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 		a.logger.Info().Msg("Running tests locally")
 
 		// Capture local OS and architecture
-		testRun.OS = runtime.GOOS
-		testRun.Arch = runtime.GOARCH
+		history.Target = &model.Target{
+			OS:   runtime.GOOS,
+			Arch: runtime.GOARCH,
+		}
 
 		testBinary, err := a.buildTestBinary("", "", buildArgs)
 		if err != nil {
@@ -522,7 +583,16 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 				Event: perfEvent,
 				Count: perfCount,
 			}
-			err := a.executeLocalTest(testBinary, recordOpts, transformedArgs, testRun)
+
+			// Store perf options in history
+			history.Perf = &model.Perf{
+				Record: &model.PerfRecord{
+					Event: perfEvent,
+					Count: perfCount,
+				},
+			}
+
+			err := a.executeLocalTest(testBinary, recordOpts, transformedArgs, &stdoutContent, &stderrContent)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Local test execution failed")
 				finalErr = err
@@ -530,13 +600,14 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 			}
 
 			// Process perf.data
-			if err := perf.ConvertPerfToPprof(a.logger, "perf.data"); err != nil {
+			profilePath := filepath.Join(runDir, "perf.pb.gz")
+			if err := perf.ConvertPerfToPprof(a.logger, "perf.data", profilePath); err != nil {
 				a.logger.Error().Err(err).Msg("Failed to convert performance data to pprof")
 				finalErr = err
 				return err
 			}
 
-			// Note: artifacts will be saved after recordTestRun creates the directory
+			// Profile is written directly to history directory
 		} else if perfMode == "stat" {
 			var events []string
 			if len(perfEvents) > 0 {
@@ -546,14 +617,23 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 				Events: events,
 				Detail: perfDetail,
 			}
-			err := a.executeLocalTestWithStatOptions(testBinary, statOpts, transformedArgs, testRun)
+
+			// Store perf options in history
+			history.Perf = &model.Perf{
+				Stat: &model.PerfStat{
+					Events: events,
+					Detail: perfDetail,
+				},
+			}
+
+			err := a.executeLocalTestWithStatOptions(testBinary, statOpts, transformedArgs, &stdoutContent, &stderrContent)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Local test execution failed")
 				finalErr = err
 				return err
 			}
 		} else {
-			err := a.executeLocalTest(testBinary, nil, transformedArgs, testRun)
+			err := a.executeLocalTest(testBinary, nil, transformedArgs, &stdoutContent, &stderrContent)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Local test execution failed")
 				finalErr = err

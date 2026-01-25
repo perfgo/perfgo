@@ -103,8 +103,8 @@ func ProfileCountFlag() cli.Flag {
 
 // ConvertPerfToPprof converts a local perf.data file to pprof format.
 // The perf script output is written to a temporary file that is deleted after processing.
-func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string) error {
-	logger.Info().Str("input", perfDataPath).Msg("Processing performance data locally")
+func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath string) error {
+	logger.Info().Str("input", perfDataPath).Str("output", outputPath).Msg("Processing performance data locally")
 
 	// Create temporary file for perf script output
 	tempFile, err := os.CreateTemp("", "perf-script-*.txt")
@@ -138,11 +138,11 @@ func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string) error {
 	}
 
 	// Parse the perf script output from temp file
-	return ParsePerfScript(logger, tempFile)
+	return ParsePerfScript(logger, tempFile, outputPath)
 }
 
 // ParsePerfScript parses perf script output and creates a pprof profile.
-func ParsePerfScript(logger zerolog.Logger, scriptOutput io.Reader) error {
+func ParsePerfScript(logger zerolog.Logger, scriptOutput io.Reader, outputPath string) error {
 	logger.Info().Msg("Parsing perf script output")
 
 	// Create parser and parse the output
@@ -153,7 +153,7 @@ func ParsePerfScript(logger zerolog.Logger, scriptOutput io.Reader) error {
 	}
 
 	// Write profile to file
-	profileFile := "perf.pb.gz"
+	profileFile := outputPath
 	f, err := os.Create(profileFile)
 	if err != nil {
 		return fmt.Errorf("failed to create profile file: %w", err)
@@ -176,10 +176,18 @@ func ParsePerfScript(logger zerolog.Logger, scriptOutput io.Reader) error {
 	return nil
 }
 
+// BinaryArtifact represents a binary that was copied for the profile.
+type BinaryArtifact struct {
+	RemotePath string // Original path on remote
+	LocalPath  string // Relative path in history directory
+	Size       uint64 // File size in bytes
+}
+
 // ProcessPerfData processes perf data from a remote host and creates a pprof profile.
 // It resolves binary paths through /proc/<pid>/root for containerized processes.
 // The perf script output is written to a temporary file that is deleted after processing.
-func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir string, pids []string) error {
+// Returns a list of binaries that were copied for artifact registration.
+func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir string, outputPath string, binDir string, pids []string) ([]BinaryArtifact, error) {
 	remotePerfData := fmt.Sprintf("%s/perf.data", remoteBaseDir)
 
 	logger.Info().
@@ -189,7 +197,7 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 	// Create temporary file for perf script output
 	tempFile, err := os.CreateTemp("", "perf-script-*.txt")
 	if err != nil {
-		return fmt.Errorf("failed to create temporary file: %w", err)
+		return nil, fmt.Errorf("failed to create temporary file: %w", err)
 	}
 	tempPath := tempFile.Name()
 	defer func() {
@@ -201,7 +209,7 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 	// Run perf script remotely and stream output to temp file
 	perfScriptCmd := fmt.Sprintf("perf script -i %s", remotePerfData)
 	if err := sshClient.Run(perfScriptCmd, ssh.WithStdOut(tempFile)); err != nil {
-		return fmt.Errorf("failed to run perf script remotely: %w", err)
+		return nil, fmt.Errorf("failed to run perf script remotely: %w", err)
 	}
 
 	// Get file size for logging
@@ -213,13 +221,13 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 
 	// Seek back to beginning for reading
 	if _, err := tempFile.Seek(0, 0); err != nil {
-		return fmt.Errorf("failed to seek temporary file: %w", err)
+		return nil, fmt.Errorf("failed to seek temporary file: %w", err)
 	}
 
 	// Read the entire file into memory for extractBinaryPaths
 	scriptBytes, err := io.ReadAll(tempFile)
 	if err != nil {
-		return fmt.Errorf("failed to read temporary file: %w", err)
+		return nil, fmt.Errorf("failed to read temporary file: %w", err)
 	}
 	scriptOutput := string(scriptBytes)
 
@@ -231,13 +239,13 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 
 	// Copy binaries from remote host
 	localBinaries := make(map[string]string) // remote path -> local path
+	var binaryArtifacts []BinaryArtifact
 	if len(binaryPaths) > 0 && len(pids) > 0 {
 		logger.Info().Msg("Copying binaries from remote host")
-		
+
 		// Create binaries directory
-		binDir := "profile-binaries"
 		if err := os.MkdirAll(binDir, 0755); err != nil {
-			return fmt.Errorf("failed to create binaries directory: %w", err)
+			return nil, fmt.Errorf("failed to create binaries directory: %w", err)
 		}
 
 		for _, remotePath := range binaryPaths {
@@ -281,6 +289,16 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 			}
 
 			localBinaries[remotePath] = localPath
+
+			// Collect artifact information
+			if info, err := os.Stat(localPath); err == nil {
+				binaryArtifacts = append(binaryArtifacts, BinaryArtifact{
+					RemotePath: remotePath,
+					LocalPath:  filepath.Join("profile-binaries", filepath.Base(remotePath)),
+					Size:       uint64(info.Size()),
+				})
+			}
+
 			logger.Debug().
 				Str("remote", remotePath).
 				Str("pid", foundPID).
@@ -298,7 +316,7 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 	parser := perfscript.New()
 	prof, err := parser.Parse(strings.NewReader(scriptOutput))
 	if err != nil {
-		return fmt.Errorf("failed to parse perf script: %w", err)
+		return nil, fmt.Errorf("failed to parse perf script: %w", err)
 	}
 
 	// Update binary paths in the profile to point to local copies
@@ -309,20 +327,20 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 	}
 
 	// Write profile to file
-	profileFile := "perf.pb.gz"
+	profileFile := outputPath
 	f, err := os.Create(profileFile)
 	if err != nil {
-		return fmt.Errorf("failed to create profile file: %w", err)
+		return nil, fmt.Errorf("failed to create profile file: %w", err)
 	}
 	defer f.Close()
 
 	if err := prof.Write(f); err != nil {
-		return fmt.Errorf("failed to write profile: %w", err)
+		return nil, fmt.Errorf("failed to write profile: %w", err)
 	}
 
 	logger.Info().
 		Str("profile", profileFile).
-		Str("binaries", "profile-binaries/").
+		Str("binaries", binDir).
 		Int("samples", len(prof.Sample)).
 		Int("functions", len(prof.Function)).
 		Int("locations", len(prof.Location)).
@@ -330,7 +348,7 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 
 	logger.Info().Msgf("View profile with: go tool pprof %s", profileFile)
 
-	return nil
+	return binaryArtifacts, nil
 }
 
 // extractBinaryPaths extracts unique binary paths from perf script output.

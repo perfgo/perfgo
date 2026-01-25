@@ -11,14 +11,13 @@ import (
 	"os/exec"
 
 	"github.com/perfgo/perfgo/cli/perf"
-	"github.com/perfgo/perfgo/model"
 )
 
-func (a *App) executeLocalTest(binaryPath string, recordOpts *perf.RecordOptions, args []string, testRun *model.TestRun) error {
-	return a.executeLocalTestWithOptions(binaryPath, recordOpts, args, testRun)
+func (a *App) executeLocalTest(binaryPath string, recordOpts *perf.RecordOptions, args []string, stdout, stderr *string) error {
+	return a.executeLocalTestWithOptions(binaryPath, recordOpts, args, stdout, stderr)
 }
 
-func (a *App) executeLocalTestWithStatOptions(binaryPath string, statOpts perf.StatOptions, args []string, testRun *model.TestRun) error {
+func (a *App) executeLocalTestWithStatOptions(binaryPath string, statOpts perf.StatOptions, args []string, stdout, stderr *string) error {
 	a.logger.Debug().
 		Str("binary", binaryPath).
 		Strs("args", args).
@@ -42,9 +41,9 @@ func (a *App) executeLocalTestWithStatOptions(binaryPath string, statOpts perf.S
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
 	if err := cmd.Run(); err != nil {
-		// Save captured output to testRun
-		testRun.StdoutFile = stdoutBuf.String()
-		testRun.StderrFile = stderrBuf.String()
+		// Save captured output
+		*stdout = stdoutBuf.String()
+		*stderr = stderrBuf.String()
 
 		// Test failures are expected to return non-zero exit codes
 		// Check if it's an ExitError (test failed) vs other errors
@@ -57,15 +56,15 @@ func (a *App) executeLocalTestWithStatOptions(binaryPath string, statOpts perf.S
 		return fmt.Errorf("failed to execute test: %w", err)
 	}
 
-	// Save captured output to testRun
-	testRun.StdoutFile = stdoutBuf.String()
-	testRun.StderrFile = stderrBuf.String()
+	// Save captured output
+	*stdout = stdoutBuf.String()
+	*stderr = stderrBuf.String()
 
 	a.logger.Info().Msg("Tests completed successfully")
 	return nil
 }
 
-func (a *App) executeLocalTestWithOptions(binaryPath string, recordOpts *perf.RecordOptions, args []string, testRun *model.TestRun) error {
+func (a *App) executeLocalTestWithOptions(binaryPath string, recordOpts *perf.RecordOptions, args []string, stdout, stderr *string) error {
 	logMsg := a.logger.Debug().
 		Str("binary", binaryPath).
 		Strs("args", args)
@@ -110,9 +109,9 @@ func (a *App) executeLocalTestWithOptions(binaryPath string, recordOpts *perf.Re
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
 	if err := cmd.Run(); err != nil {
-		// Save captured output to testRun
-		testRun.StdoutFile = stdoutBuf.String()
-		testRun.StderrFile = stderrBuf.String()
+		// Save captured output
+		*stdout = stdoutBuf.String()
+		*stderr = stderrBuf.String()
 
 		// Test failures are expected to return non-zero exit codes
 		// Check if it's an ExitError (test failed) vs other errors
@@ -125,9 +124,9 @@ func (a *App) executeLocalTestWithOptions(binaryPath string, recordOpts *perf.Re
 		return fmt.Errorf("failed to execute test: %w", err)
 	}
 
-	// Save captured output to testRun
-	testRun.StdoutFile = stdoutBuf.String()
-	testRun.StderrFile = stderrBuf.String()
+	// Save captured output
+	*stdout = stdoutBuf.String()
+	*stderr = stderrBuf.String()
 
 	if recordOpts != nil {
 		a.logger.Info().Str("output", "perf.data").Msg("Performance data collected")
