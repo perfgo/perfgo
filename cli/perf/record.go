@@ -5,7 +5,6 @@ package perf
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -103,26 +102,43 @@ func ProfileCountFlag() cli.Flag {
 }
 
 // ConvertPerfToPprof converts a local perf.data file to pprof format.
+// The perf script output is written to a temporary file that is deleted after processing.
 func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string) error {
 	logger.Info().Str("input", perfDataPath).Msg("Processing performance data locally")
 
-	// Run perf script locally
-	cmd := exec.Command("perf", "script", "-i", perfDataPath)
-	output, err := cmd.Output()
+	// Create temporary file for perf script output
+	tempFile, err := os.CreateTemp("", "perf-script-*.txt")
 	if err != nil {
+		return fmt.Errorf("failed to create temporary file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	defer func() {
+		tempFile.Close()
+		os.Remove(tempPath)
+		logger.Debug().Str("temp_file", tempPath).Msg("Cleaned up temporary perf script file")
+	}()
+
+	// Run perf script locally and write to temp file
+	cmd := exec.Command("perf", "script", "-i", perfDataPath)
+	cmd.Stdout = tempFile
+	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to run perf script: %w", err)
 	}
 
-	// Save the perf script output
-	scriptFile := "perf.script"
-	if err := os.WriteFile(scriptFile, output, 0644); err != nil {
-		return fmt.Errorf("failed to write perf script output: %w", err)
+	// Get file size for logging
+	fileInfo, _ := tempFile.Stat()
+	logger.Info().
+		Int64("size_bytes", fileInfo.Size()).
+		Str("temp_file", tempPath).
+		Msg("Performance script output written to temporary file")
+
+	// Seek back to beginning for reading
+	if _, err := tempFile.Seek(0, 0); err != nil {
+		return fmt.Errorf("failed to seek temporary file: %w", err)
 	}
 
-	logger.Info().Str("file", scriptFile).Msg("Performance script output saved")
-
-	// Parse and summarize the perf script output
-	return ParsePerfScript(logger, bytes.NewReader(output))
+	// Parse the perf script output from temp file
+	return ParsePerfScript(logger, tempFile)
 }
 
 // ParsePerfScript parses perf script output and creates a pprof profile.
@@ -150,7 +166,6 @@ func ParsePerfScript(logger zerolog.Logger, scriptOutput io.Reader) error {
 
 	logger.Info().
 		Str("profile", profileFile).
-		Str("script", "perf.script").
 		Int("samples", len(prof.Sample)).
 		Int("functions", len(prof.Function)).
 		Int("locations", len(prof.Location)).
@@ -163,6 +178,7 @@ func ParsePerfScript(logger zerolog.Logger, scriptOutput io.Reader) error {
 
 // ProcessPerfData processes perf data from a remote host and creates a pprof profile.
 // It resolves binary paths through /proc/<pid>/root for containerized processes.
+// The perf script output is written to a temporary file that is deleted after processing.
 func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir string, pids []string) error {
 	remotePerfData := fmt.Sprintf("%s/perf.data", remoteBaseDir)
 
@@ -170,20 +186,42 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 		Str("remote", remotePerfData).
 		Msg("Processing performance data on remote host")
 
-	// Run perf script remotely and capture output
-	perfScriptCmd := fmt.Sprintf("perf script -i %s", remotePerfData)
-	scriptOutput, _, err := sshClient.RunCommand(perfScriptCmd)
+	// Create temporary file for perf script output
+	tempFile, err := os.CreateTemp("", "perf-script-*.txt")
 	if err != nil {
+		return fmt.Errorf("failed to create temporary file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	defer func() {
+		tempFile.Close()
+		os.Remove(tempPath)
+		logger.Debug().Str("temp_file", tempPath).Msg("Cleaned up temporary perf script file")
+	}()
+
+	// Run perf script remotely and stream output to temp file
+	perfScriptCmd := fmt.Sprintf("perf script -i %s", remotePerfData)
+	if err := sshClient.Run(perfScriptCmd, ssh.WithStdOut(tempFile)); err != nil {
 		return fmt.Errorf("failed to run perf script remotely: %w", err)
 	}
 
-	// Save the perf script output locally
-	scriptFile := "perf.script"
-	if err := os.WriteFile(scriptFile, []byte(scriptOutput), 0644); err != nil {
-		return fmt.Errorf("failed to write perf script output: %w", err)
+	// Get file size for logging
+	fileInfo, _ := tempFile.Stat()
+	logger.Info().
+		Int64("size_bytes", fileInfo.Size()).
+		Str("temp_file", tempPath).
+		Msg("Performance script output written to temporary file")
+
+	// Seek back to beginning for reading
+	if _, err := tempFile.Seek(0, 0); err != nil {
+		return fmt.Errorf("failed to seek temporary file: %w", err)
 	}
 
-	logger.Info().Str("file", scriptFile).Msg("Performance script output saved")
+	// Read the entire file into memory for extractBinaryPaths
+	scriptBytes, err := io.ReadAll(tempFile)
+	if err != nil {
+		return fmt.Errorf("failed to read temporary file: %w", err)
+	}
+	scriptOutput := string(scriptBytes)
 
 	// Extract unique binary paths from perf script output
 	binaryPaths := extractBinaryPaths(scriptOutput)
@@ -284,7 +322,6 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 
 	logger.Info().
 		Str("profile", profileFile).
-		Str("script", "perf.script").
 		Str("binaries", "profile-binaries/").
 		Int("samples", len(prof.Sample)).
 		Int("functions", len(prof.Function)).
