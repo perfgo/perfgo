@@ -1,0 +1,109 @@
+# GoReleaser configuration for perfgo
+# Documentation: https://goreleaser.com
+
+version: 2
+
+builds:
+  - id: perfgo
+    main: .
+    binary: perfgo
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # Flags for building
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.CommitDate}}
+
+archives:
+  - id: perfgo-archive
+    format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE
+      - examples/**/*
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - '^build:'
+      - 'README'
+      - 'Merge pull request'
+      - 'Merge branch'
+  groups:
+    - title: 'New Features'
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: 'Bug Fixes'
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: 'Performance Improvements'
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: 'Other Changes'
+      order: 999
+
+release:
+  github:
+    owner: perfgo
+    name: perfgo
+  draft: false
+  prerelease: auto
+  mode: append
+  header: |
+    ## perfgo {{ .Tag }}
+
+    A Go CLI tool for running and profiling Go benchmark with Linux `perf` integration.
+
+    ### Installation
+
+    ```bash
+    # Using go install
+    go install github.com/perfgo/perfgo@{{ .Tag }}
+
+    # Or download binary from assets below
+    ```
+
+    ### What's Changed
+  footer: |
+    **Full Changelog**: https://github.com/perfgo/perfgo/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+    ## Requirements
+    - Go 1.24+
+    - Linux `perf` (for profiling features)
+    - SSH access (for remote execution features)
+
+announce:
+  skip: true

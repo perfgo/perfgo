@@ -47,7 +47,6 @@ func New() *App {
 			Flags: []cli.Flag{
 				&cli.BoolFlag{
 					Name:    "verbose",
-					Aliases: []string{"v"},
 					Usage:   "Enable verbose (debug) logging",
 				},
 			},
@@ -274,6 +273,14 @@ Display Priority:
 
 func (a *App) Run(args []string) error {
 	return a.cli.Run(args)
+}
+
+// SetVersion sets the version information for the CLI application
+func (a *App) SetVersion(version, commit, date string) {
+	a.cli.Version = version
+	if commit != "none" && commit != "" {
+		a.cli.Version = fmt.Sprintf("%s (commit: %s, built: %s)", version, commit[:8], date)
+	}
 }
 
 func (a *App) testDefault(ctx *cli.Context) error {
