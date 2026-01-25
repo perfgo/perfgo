@@ -1,0 +1,40 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+
+  // Use Renovate's recommended base configuration
+  extends: [
+    "config:recommended",
+  ],
+
+  // Run weekly on Monday mornings
+  schedule: [
+    "before 6am on Monday",
+  ],
+
+  // Default labels for all PRs
+  labels: ["dependencies"],
+
+  // Maximum number of concurrent PRs
+  prConcurrentLimit: 10,
+
+  packageRules: [
+    {
+      description: "Group all Go patch updates together",
+      matchManagers: ["gomod"],
+      matchUpdateTypes: ["patch"],
+      groupName: "Go patch updates",
+      labels: ["dependencies", "go"],
+    },
+    {
+      description: "Label Go minor/major updates",
+      matchManagers: ["gomod"],
+      matchUpdateTypes: ["minor", "major"],
+      labels: ["dependencies", "go"],
+    },
+    {
+      description: "Label GitHub Actions updates",
+      matchManagers: ["github-actions"],
+      labels: ["dependencies", "github-actions"],
+    },
+  ],
+}
