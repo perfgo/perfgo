@@ -225,3 +225,41 @@ func TestParser_PreserveFullPaths(t *testing.T) {
 	require.False(t, mappingFiles["myapp"], "Should not strip path to basename")
 	require.False(t, mappingFiles["binary"], "Should not strip path to basename")
 }
+
+func TestParser_MappingRanges(t *testing.T) {
+	// Test that mapping Start and Limit are properly set based on observed addresses
+	output := `program 12345 [000] 123.456789:          1 cycles:u:
+	               52ab5a function_a+0x10 (/path/to/binary)
+	               600123 function_b+0x20 (/path/to/binary)
+	               400456 function_c+0x30 (/another/binary)
+`
+
+	parser := New()
+	prof, err := parser.Parse(strings.NewReader(output))
+	require.NoError(t, err)
+
+	// Should have 2 mappings
+	require.Len(t, prof.Mapping, 2, "Expected 2 mappings")
+
+	// Check that each mapping has valid Start and Limit
+	for _, m := range prof.Mapping {
+		require.NotEqual(t, uint64(0), m.Start, "Mapping Start should not be 0 for %s", m.File)
+		require.NotEqual(t, uint64(0), m.Limit, "Mapping Limit should not be 0 for %s", m.File)
+		require.Greater(t, m.Limit, m.Start, "Mapping Limit should be greater than Start for %s", m.File)
+
+		// Verify all locations with this mapping have addresses within the range
+		for _, loc := range prof.Location {
+			if loc.Mapping != nil && loc.Mapping.ID == m.ID && loc.Address != 0 {
+				require.GreaterOrEqual(t, loc.Address, m.Start,
+					"Location address 0x%x should be >= mapping Start 0x%x for %s",
+					loc.Address, m.Start, m.File)
+				require.Less(t, loc.Address, m.Limit,
+					"Location address 0x%x should be < mapping Limit 0x%x for %s",
+					loc.Address, m.Limit, m.File)
+			}
+		}
+	}
+
+	// Profile should pass validation
+	require.NoError(t, prof.CheckValid())
+}
