@@ -138,7 +138,7 @@ func (a *App) list(ctx *cli.Context) error {
 	}
 
 	fmt.Println("\nView test output: cat <path>/stdout.txt")
-	fmt.Println("View profile: go tool pprof <path>/perf.pb.gz")
+	fmt.Println("View profile: perfgo view <ID>")
 
 	return nil
 }

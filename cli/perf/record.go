@@ -107,7 +107,7 @@ func ProfileCountFlag() cli.Flag {
 // The perf script output is written to a temporary file that is deleted after processing.
 // Returns a list of binaries that were copied for artifact registration.
 // Binaries are stored as <base32-sha256>.<basename>.binary in runDir.
-func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath string, runDir string) ([]BinaryArtifact, error) {
+func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath string, runDir string, historyID string) ([]BinaryArtifact, error) {
 	logger.Info().Str("input", perfDataPath).Str("output", outputPath).Msg("Processing performance data locally")
 
 	// Create temporary file for perf script output
@@ -254,7 +254,11 @@ func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath s
 		Int("locations", len(prof.Location)).
 		Msg("Performance profile created")
 
-	logger.Info().Msgf("View profile with: go tool pprof %s", outputPath)
+	shortID := historyID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	logger.Info().Msgf("View profile with: perfgo view %s", shortID)
 
 	return binaryArtifacts, nil
 }
@@ -301,7 +305,7 @@ type BinaryArtifact struct {
 // The perf script output is written to a temporary file that is deleted after processing.
 // Returns a list of binaries that were copied for artifact registration.
 // Binaries are stored as <base32-sha256>.binary in runDir.
-func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir string, outputPath string, runDir string, pids []string) ([]BinaryArtifact, error) {
+func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir string, outputPath string, runDir string, pids []string, historyID string) ([]BinaryArtifact, error) {
 	remotePerfData := fmt.Sprintf("%s/perf.data", remoteBaseDir)
 
 	logger.Info().
@@ -470,7 +474,11 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 		Int("locations", len(prof.Location)).
 		Msg("Performance profile created")
 
-	logger.Info().Msgf("View profile with: go tool pprof %s", profileFile)
+	shortID := historyID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	logger.Info().Msgf("View profile with: perfgo view %s", shortID)
 
 	return binaryArtifacts, nil
 }
