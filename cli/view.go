@@ -190,8 +190,17 @@ func (a *App) displayProfile(runDir string, artifact *model.Artifact, pprofArgs 
 	profilePath := filepath.Join(runDir, artifact.File)
 	fmt.Printf("Profile: %s (%.1f KB)\n", profilePath, float64(artifact.Size)/1024)
 
-	// Build pprof command with any additional args
-	args := []string{"tool", "pprof"}
+	// Check for LLVM tools in PATH and warn if missing
+	if _, err := exec.LookPath("llvm-symbolizer"); err != nil {
+		a.logger.Warn().Msg("llvm-symbolizer not found in PATH - symbolization may be limited")
+	}
+	if _, err := exec.LookPath("llvm-objdump"); err != nil {
+		a.logger.Warn().Msg("llvm-objdump not found in PATH - disassembly may be limited")
+	}
+
+	// Build pprof command with specific version
+	// Use go run github.com/google/pprof@<version> instead of go tool pprof
+	args := []string{"run", "github.com/google/pprof@v0.0.0-20260115054156-294ebfa9ad83"}
 	args = append(args, pprofArgs...)
 	args = append(args, profilePath)
 
