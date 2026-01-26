@@ -18,25 +18,16 @@ type Parser struct {
 	functions map[string]*profile.Function
 	locations map[string]*profile.Location
 	mappings  map[string]*profile.Mapping
-	// Track address ranges for each mapping
-	mappingRanges map[string]*addressRange
-	nextID        uint64
-}
-
-// addressRange tracks the min and max addresses seen for a mapping
-type addressRange struct {
-	min uint64
-	max uint64
+	nextID    uint64
 }
 
 // New creates a new parser instance
 func New() *Parser {
 	return &Parser{
-		functions:     make(map[string]*profile.Function),
-		locations:     make(map[string]*profile.Location),
-		mappings:      make(map[string]*profile.Mapping),
-		mappingRanges: make(map[string]*addressRange),
-		nextID:        1,
+		functions: make(map[string]*profile.Function),
+		locations: make(map[string]*profile.Location),
+		mappings:  make(map[string]*profile.Mapping),
+		nextID:    1,
 	}
 }
 
@@ -150,8 +141,6 @@ func (p *Parser) parseStackFrame(line string) *profile.Location {
 	if binaryPath != "" {
 		// Use full path so pprof can find the binary for symbolization
 		mapping = p.getOrCreateMapping(binaryPath)
-		// Track the address range for this mapping
-		p.trackAddress(binaryPath, addr)
 	}
 
 	// Get or create function
@@ -209,43 +198,15 @@ func (p *Parser) getOrCreateMapping(filename string) *profile.Mapping {
 	return m
 }
 
-// trackAddress updates the address range for a mapping
-func (p *Parser) trackAddress(filename string, addr uint64) {
-	if addr == 0 {
-		return
-	}
-
-	r, exists := p.mappingRanges[filename]
-	if !exists {
-		r = &addressRange{min: addr, max: addr}
-		p.mappingRanges[filename] = r
-		return
-	}
-
-	if addr < r.min {
-		r.min = addr
-	}
-	if addr > r.max {
-		r.max = addr
-	}
-}
-
-// finalizeMapping updates mapping Start and Limit based on observed addresses
+// finalizeMapping sets mapping Start and Limit to allow all addresses.
+// We use Start=0 and Limit=max_uint64 to pass pprof validation without
+// interfering with address-to-symbol resolution. Setting Start to the
+// observed minimum address would break pprof's offset calculations and
+// cause incorrect symbol attribution.
 func (p *Parser) finalizeMapping() {
-	for filename, m := range p.mappings {
-		r, exists := p.mappingRanges[filename]
-		if !exists || r.min == 0 {
-			// No valid addresses seen, set a default range
-			m.Start = 0
-			m.Limit = ^uint64(0) // max uint64
-			continue
-		}
-
-		// Set Start to the minimum address (rounded down to page boundary)
-		// Set Limit to max address + 1 (rounded up to page boundary)
-		const pageSize = 4096
-		m.Start = (r.min / pageSize) * pageSize
-		m.Limit = ((r.max + pageSize) / pageSize) * pageSize
+	for _, m := range p.mappings {
+		m.Start = 0
+		m.Limit = ^uint64(0) // max uint64
 	}
 }
 

@@ -227,7 +227,9 @@ func TestParser_PreserveFullPaths(t *testing.T) {
 }
 
 func TestParser_MappingRanges(t *testing.T) {
-	// Test that mapping Start and Limit are properly set based on observed addresses
+	// Test that mapping Start and Limit are set to allow all addresses
+	// We use Start=0 and Limit=max_uint64 to avoid interfering with pprof's
+	// symbol resolution while still passing address validation.
 	output := `program 12345 [000] 123.456789:          1 cycles:u:
 	               52ab5a function_a+0x10 (/path/to/binary)
 	               600123 function_b+0x20 (/path/to/binary)
@@ -241,10 +243,10 @@ func TestParser_MappingRanges(t *testing.T) {
 	// Should have 2 mappings
 	require.Len(t, prof.Mapping, 2, "Expected 2 mappings")
 
-	// Check that each mapping has valid Start and Limit
+	// Check that each mapping has a wide range [0, max_uint64]
 	for _, m := range prof.Mapping {
-		require.NotEqual(t, uint64(0), m.Start, "Mapping Start should not be 0 for %s", m.File)
-		require.NotEqual(t, uint64(0), m.Limit, "Mapping Limit should not be 0 for %s", m.File)
+		require.Equal(t, uint64(0), m.Start, "Mapping Start should be 0 for %s", m.File)
+		require.Equal(t, ^uint64(0), m.Limit, "Mapping Limit should be max_uint64 for %s", m.File)
 		require.Greater(t, m.Limit, m.Start, "Mapping Limit should be greater than Start for %s", m.File)
 
 		// Verify all locations with this mapping have addresses within the range
