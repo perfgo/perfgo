@@ -31,9 +31,16 @@ Cache Line (64 bytes)
 
 ## Running Benchmarks
 
+### Step 1: Run Basic Benchmarks
+
 ```bash
-# Run just the benchmarks
-$ go test ./ -bench=. -benchmem -benchtime=10000000x -run=^$
+go test ./ -bench=. -benchmem -benchtime=10000000x -run=^$
+```
+
+<details>
+<summary>View results</summary>
+
+```
 goos: darwin
 goarch: arm64
 pkg: github.com/perfgo/perfgo/examples/false-sharing
@@ -42,10 +49,20 @@ BenchmarkNoPadding-12      	10000000	         0.6496 ns/op	       0 B/op	       
 BenchmarkWithPadding-12    	10000000	         0.1892 ns/op	       0 B/op	       0 allocs/op
 PASS
 ok  	github.com/perfgo/perfgo/examples/false-sharing	0.193s
+```
 
-# Run the benchmarks each and collect perf stat -d results
-$ perfgo test stat -- ./ -bench=WithNoPadding -benchmem -benchtime=10000000x -run=^$
+</details>
 
+### Step 2: Collect Performance Stats (No Padding)
+
+```bash
+perfgo test stat -- ./ -bench=WithNoPadding -benchmem -benchtime=10000000x -run=^$
+```
+
+<details>
+<summary>View results</summary>
+
+```
         25,604,929      task-clock                       #    1.794 CPUs utilized
                231      context-switches                 #    9.022 K/sec
                 17      cpu-migrations                   #  663.935 /sec
@@ -63,9 +80,20 @@ $ perfgo test stat -- ./ -bench=WithNoPadding -benchmem -benchtime=10000000x -ru
 
        0.021153000 seconds user
        0.005875000 seconds sys
+```
 
-$ perfgo test stat -- ./ -bench=WithPadding -benchmem -benchtime=10000000x -run=^$
+</details>
 
+### Step 3: Collect Performance Stats (With Padding)
+
+```bash
+perfgo test stat -- ./ -bench=WithPadding -benchmem -benchtime=10000000x -run=^$
+```
+
+<details>
+<summary>View results</summary>
+
+```
         11,131,960      task-clock                       #    1.769 CPUs utilized
                220      context-switches                 #   19.763 K/sec
                 11      cpu-migrations                   #  988.146 /sec
@@ -83,17 +111,31 @@ $ perfgo test stat -- ./ -bench=WithPadding -benchmem -benchtime=10000000x -run=
 
        0.009082000 seconds user
        0.003652000 seconds sys
+```
 
-# Analysis: Nothing clearly is pointing to false sharing here, given that both
-# benchmarks, do the exact same work, we can significant decrease in time elasped
-# and L1-dcache-loads for the same amount of work. Also the 
+</details>
 
-# Run the benchmarks and collect cache-miss events
-$ perfgo test profile -e cache-loads -- ./ -bench=. -benchmem -benchtime=10000000x -run=^$
-# Result see: https://flamegraph.com/share/fb224270-fc55-11f0-be3c-0235fc700989
+**Analysis:** While nothing clearly points to false sharing in the raw counters, comparing the two benchmarks reveals the impact. Despite doing the exact same work, we see a significant decrease in time elapsed and L1-dcache-loads with padding.
 
-# To find the false sharing without knowing about it, perf c2c can provide useful pointers
-# TODO: Add something about c2c analysis, once the subcommand exists
+### Step 4: Profile Cache Loads
+
+```bash
+perfgo test profile -e cache-loads -- ./ -bench=. -benchmem -benchtime=10000000x -run=^$
+```
+
+<details>
+<summary>View flamegraph</summary>
+
+Result: https://flamegraph.com/share/fb224270-fc55-11f0-be3c-0235fc700989
+
+</details>
+
+### Step 5: Detecting False Sharing with c2c Analysis
+
+To find false sharing without prior knowledge, perf c2c can provide useful pointers.
+
+```bash
+# TODO: Add c2c analysis command once the subcommand exists
 ```
 
 ## Example Results
