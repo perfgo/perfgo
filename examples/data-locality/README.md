@@ -65,12 +65,6 @@ When calculating average age, the CPU:
 
 **Cache efficiency:** ~100% (all loaded data is used)
 
-## Files
-
-| File | Description |
-|------|-------------|
-| `data_locality_test.go` | Core implementation with `Person` (AoS) vs `PersonDatabase` (SoA) and benchmarks demonstrating the performance impact |
-
 ## Running Benchmarks
 
 ### Step 1: Run Basic Benchmarks

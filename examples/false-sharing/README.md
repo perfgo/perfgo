@@ -22,13 +22,6 @@ Cache Line (64 bytes)
           between cores!
 ```
 
-## Files
-
-| File | Description |
-|------|-------------|
-| `false_sharing.go` | Core implementation with `Metrics` (bad) vs `PaddedMetrics` (good) |
-| `benchmark_test.go` | Benchmarks demonstrating the performance impact |
-
 ## Running Benchmarks
 
 ### Step 1: Run Basic Benchmarks
