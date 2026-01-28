@@ -134,9 +134,7 @@ The [flamegraph] shows a moderately higher cache miss rate in the not padded cou
 
 ### Step 5: Detecting False Sharing with c2c Analysis
 
-To find false sharing without prior knowledge, perf c2c can provide useful pointers.
-
-### Step 5: Profile Cache Loads
+To find false sharing without prior knowledge, a `perf c2c` provides useful insights:
 
 ```bash
 perfgo test cache-to-cache -- ./ -bench=NoPadding -benchmem -benchtime=10s -run=^$
