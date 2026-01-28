@@ -120,7 +120,7 @@ PerfGo allows you to specify which PMU events to monitor. Common events include:
 Events can be refined with suffix modifiers:
 - `:u` - Count only user-space events
 - `:k` - Count only kernel-space events
-- `:p` - Set precise event sampling (PEBS on Intel)
+- `:p` - Set precise event sampling (PEBS on Intel, IBS on AMD)
 
 Example: `cache-misses:u` counts only user-space cache misses.
 
@@ -132,14 +132,18 @@ You can also specify raw PMU events using hexadecimal values from your CPU vendo
 # Intel: Monitor event 0x2e (LLC references), umask 0x41
 perfgo test profile -e r412e -- ./package -bench=.
 
+# ARM: Monitor event 0x40 L1_reads 0x41 L1_writes 
+perfgo test profile -e r0040,r0041 -- ./package -bench=.
+
 # View with perf list to find available events
 perf list
 ```
 
 **CPU Vendor Documentation:**
-- [Intel 64 and IA-32 Architectures Software Developer Manuals](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) - Volume 3B, Chapter 20 contains PMU event listings
-- [AMD Processor Programming Reference](https://www.amd.com/en/search/documentation/hub.html) - Search for "PPR" for your specific CPU family
-- [ARM PMU Event Specifications](https://developer.arm.com/documentation/102073/0100/PMU-events)
+
+- [Intel 64 and IA-32 Architectures Software Developer Manuals](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) - Volume 3B, Chapter 21 contains PMU event listings
+- [AMD Processor Programming Reference](https://docs.amd.com/search/all?query=Processor+Programming+Reference+(PPR)+&content-lang=en-US) - Search for "PPR" for your specific CPU family
+- [ARM PMU Event Specifications](https://developer.arm.com/documentation/#f-navigationhierarchiescontenttype=Technical%20Reference%20Manual&numberOfResults=48) - Look for "Technical Reference Manual" of your CPU, then "Performance Monitoring Unit" > "PMU Events"
 
 
 ## Concete examples
