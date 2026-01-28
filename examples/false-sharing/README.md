@@ -124,11 +124,13 @@ perfgo test profile -e cache-loads -- ./ -bench=. -benchmem -benchtime=10000000x
 ```
 
 <details>
-<summary>View flamegraph</summary>
+<summary>View [flamegraph]</summary>
 
-Result: https://flamegraph.com/share/fb224270-fc55-11f0-be3c-0235fc700989
+The [flamegraph] shows a moderately higher cache miss rate in the not padded counter struct.
 
 </details>
+
+[flamegraph]:https://flamegraph.com/share/eacb682c-fc52-11f0-bff4-ee750a85d76a
 
 ### Step 5: Detecting False Sharing with c2c Analysis
 
