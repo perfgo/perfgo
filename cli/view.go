@@ -138,14 +138,25 @@ func (a *App) displayHistoryEntry(entry *history.Entry, pprofArgs []string) erro
 		if h.Perf.Stat != nil {
 			fmt.Printf("Perf Stat: events=%v\n", h.Perf.Stat.Events)
 		}
+		if h.Perf.C2C != nil {
+			fmt.Printf("Perf C2C: event=%s", h.Perf.C2C.Event)
+			if h.Perf.C2C.Count > 0 {
+				fmt.Printf(", count=%d", h.Perf.C2C.Count)
+			}
+			if h.Perf.C2C.ReportMode != "" {
+				fmt.Printf(", mode=%s", h.Perf.C2C.ReportMode)
+			}
+			fmt.Println()
+		}
 	}
 	fmt.Println()
 
 	// Prioritize artifacts for display
-	// Highest priority: pprof profiles, perf stat outputs
+	// Highest priority: pprof profiles, perf stat outputs, c2c reports
 	// Lowest priority: binaries
 	var profileArtifact *model.Artifact
 	var statArtifact *model.Artifact
+	var c2cReportArtifact *model.Artifact
 	var stdoutArtifact *model.Artifact
 	var stderrArtifact *model.Artifact
 
@@ -156,6 +167,8 @@ func (a *App) displayHistoryEntry(entry *history.Entry, pprofArgs []string) erro
 			profileArtifact = artifact
 		case model.ArtifactTypePerfStat, model.ArtifactTypePerfStatDetailed:
 			statArtifact = artifact
+		case model.ArtifactTypePerfC2CReport:
+			c2cReportArtifact = artifact
 		case model.ArtifactTypeStdout:
 			stdoutArtifact = artifact
 		case model.ArtifactTypeStderr:
@@ -170,6 +183,10 @@ func (a *App) displayHistoryEntry(entry *history.Entry, pprofArgs []string) erro
 
 	if statArtifact != nil {
 		return a.displayPerfStat(entry.FullPath, statArtifact)
+	}
+
+	if c2cReportArtifact != nil {
+		return a.displayC2CReport(entry.FullPath, c2cReportArtifact)
 	}
 
 	if stdoutArtifact != nil {
@@ -219,6 +236,17 @@ func (a *App) displayPerfStat(runDir string, artifact *model.Artifact) error {
 	data, err := os.ReadFile(statPath)
 	if err != nil {
 		return fmt.Errorf("failed to read stat output: %w", err)
+	}
+	fmt.Println(string(data))
+	return nil
+}
+
+func (a *App) displayC2CReport(runDir string, artifact *model.Artifact) error {
+	reportPath := filepath.Join(runDir, artifact.File)
+	fmt.Printf("C2C Report: %s\n", reportPath)
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		return fmt.Errorf("failed to read c2c report: %w", err)
 	}
 	fmt.Println(string(data))
 	return nil

@@ -30,6 +30,10 @@ func (a *App) attachProfile(ctx *cli.Context) error {
 	return a.runAttach(ctx, "profile")
 }
 
+func (a *App) attachC2C(ctx *cli.Context) error {
+	return a.runAttach(ctx, "c2c")
+}
+
 func (a *App) attachShell(ctx *cli.Context) error {
 	return a.runAttach(ctx, "shell")
 }
@@ -56,6 +60,10 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 	var perfCount int
 	var perfEvents []string
 	var perfDetail bool
+	var c2cEvent string
+	var c2cCount int
+	var c2cReportMode string
+	var c2cShowAll bool
 	if mode == "profile" {
 		perfEvent = ctx.String("event")
 		perfCount = ctx.Int("count")
@@ -63,6 +71,10 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 		perfEvents = ctx.StringSlice("event")
 		perfEvent = strings.Join(perfEvents, ",")
 		perfDetail = ctx.Bool("detail")
+	} else if mode == "c2c" {
+		// Use default values for c2c
+		c2cReportMode = "stdio"
+		c2cShowAll = false
 	}
 
 	// Prepare history recording
@@ -362,6 +374,34 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 			finalErr = fmt.Errorf("failed to execute perf record: %w", err)
 			return finalErr
 		}
+	} else if mode == "c2c" {
+		c2cOpts := perf.C2COptions{
+			Event:    c2cEvent,
+			Count:    c2cCount,
+			Duration: duration,
+		}
+
+		reportOpts := perf.C2CReportOptions{
+			Mode:    c2cReportMode,
+			ShowAll: c2cShowAll,
+		}
+
+		// Store perf options in history
+		history.Perf = &model.Perf{
+			C2C: &model.PerfC2C{
+				Event:      c2cEvent,
+				Count:      c2cCount,
+				PIDs:       allPIDs,
+				Duration:   duration,
+				ReportMode: c2cReportMode,
+				ShowAll:    c2cShowAll,
+			},
+		}
+
+		if err := a.executePerfC2C(sshClient, allPIDs, c2cOpts, reportOpts, runDir, history); err != nil {
+			finalErr = fmt.Errorf("failed to execute perf c2c: %w", err)
+			return finalErr
+		}
 	} else if mode == "shell" {
 		if err := a.executeShell(sshClient, allPIDs); err != nil {
 			finalErr = fmt.Errorf("failed to execute shell: %w", err)
@@ -600,6 +640,66 @@ func (a *App) executePerfRecord(client *ssh.Client, pids []string, recordOpts *p
 			Str("remote", binArtifact.RemotePath).
 			Str("local", binArtifact.LocalPath).
 			Msg("Registered binary artifact")
+	}
+
+	return nil
+}
+
+// executePerfC2C runs perf c2c record on the specified PIDs via SSH and generates a report.
+func (a *App) executePerfC2C(client *ssh.Client, pids []string, c2cOpts perf.C2COptions, reportOpts perf.C2CReportOptions, runDir string, history *model.History) error {
+	// Set PIDs and output path
+	c2cOpts.PIDs = pids
+	c2cOpts.OutputPath = "/tmp/perf.data"
+
+	logEvent := a.logger.Info().
+		Strs("pids", pids).
+		Int("duration", c2cOpts.Duration)
+	if c2cOpts.Event != "" {
+		logEvent.Str("event", c2cOpts.Event)
+		if c2cOpts.Count > 0 {
+			logEvent.Int("count", c2cOpts.Count)
+		}
+	}
+	logEvent.Msg("Running perf c2c record on PIDs")
+
+	// Build perf c2c record command
+	perfCmd := perf.BuildC2CRecordCommand(c2cOpts)
+
+	a.logger.Debug().Str("command", perfCmd).Msg("Executing perf c2c record command")
+
+	output, _, err := client.RunCommand(perfCmd)
+	if err != nil {
+		return fmt.Errorf("perf c2c record failed: %w", err)
+	}
+
+	// Display the output
+	if output != "" {
+		fmt.Println(output)
+	}
+
+	a.logger.Info().
+		Str("remote_path", c2cOpts.OutputPath).
+		Msg("C2C performance data collected on remote host")
+
+	// Process perf.data and generate c2c report
+	remoteBaseDir := "/tmp"
+	reportFilename, err := perf.ProcessC2CData(a.logger, client, remoteBaseDir, runDir, reportOpts, history.ID)
+	if err != nil {
+		return fmt.Errorf("failed to process c2c data: %w", err)
+	}
+
+	// Get report file size and register artifact
+	reportPath := filepath.Join(runDir, reportFilename)
+	if reportInfo, err := os.Stat(reportPath); err == nil {
+		history.Artifacts = append(history.Artifacts, model.Artifact{
+			Type: model.ArtifactTypePerfC2CReport,
+			Size: uint64(reportInfo.Size()),
+			File: reportFilename,
+		})
+		a.logger.Debug().
+			Str("report", reportFilename).
+			Uint64("size", uint64(reportInfo.Size())).
+			Msg("Registered c2c report artifact")
 	}
 
 	return nil

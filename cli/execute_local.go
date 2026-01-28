@@ -135,3 +135,55 @@ func (a *App) executeLocalTestWithOptions(binaryPath string, recordOpts *perf.Re
 	a.logger.Info().Msg("Tests completed successfully")
 	return nil
 }
+
+func (a *App) executeLocalTestWithC2COptions(binaryPath string, c2cOpts perf.C2COptions, reportOpts perf.C2CReportOptions, args []string, stdout, stderr *string) error {
+	a.logger.Debug().
+		Str("binary", binaryPath).
+		Strs("args", args).
+		Msg("Starting local test execution with perf c2c")
+
+	c2cOpts.Binary = binaryPath
+	c2cOpts.Args = args
+	perfArgs := perf.BuildC2CRecordArgs(c2cOpts)
+	cmd := exec.Command("perf", perfArgs...)
+
+	logMsg := a.logger.Info()
+	if c2cOpts.Event != "" {
+		logMsg.Str("event", c2cOpts.Event)
+		if c2cOpts.Count > 0 {
+			logMsg.Int("count", c2cOpts.Count)
+		}
+	}
+	logMsg.Msg("Wrapping test execution with perf c2c record")
+
+	// Capture stdout and stderr for history
+	var stdoutBuf, stderrBuf bytes.Buffer
+
+	// Create multi-writers to both capture and display output
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+
+	if err := cmd.Run(); err != nil {
+		// Save captured output
+		*stdout = stdoutBuf.String()
+		*stderr = stderrBuf.String()
+
+		// Test failures are expected to return non-zero exit codes
+		// Check if it's an ExitError (test failed) vs other errors
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			a.logger.Info().
+				Int("exit_code", exitErr.ExitCode()).
+				Msg("Tests completed with failures")
+			return fmt.Errorf("tests failed with exit code %d", exitErr.ExitCode())
+		}
+		return fmt.Errorf("failed to execute test: %w", err)
+	}
+
+	// Save captured output
+	*stdout = stdoutBuf.String()
+	*stderr = stderrBuf.String()
+
+	a.logger.Info().Str("output", "perf.data").Msg("C2C performance data collected")
+	a.logger.Info().Msg("Tests completed successfully")
+	return nil
+}

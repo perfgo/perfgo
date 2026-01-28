@@ -111,6 +111,22 @@ func New() *App {
 					perf.ProfileCountFlag(),
 				},
 			},
+			{
+				Name:    "c2c",
+				Aliases: []string{"cache-to-cache"},
+				Usage:   "Run tests with perf c2c to detect cache contention and false sharing",
+				Action:  app.testC2C,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "remote-host",
+						Usage: "SSH host to run tests on (will auto-detect OS and architecture)",
+					},
+					&cli.BoolFlag{
+						Name:  "keep",
+						Usage: "Keep remote artifacts (don't clean up after test execution)",
+					},
+				},
+			},
 		},
 		// Default action when no subcommand is specified
 		Action: app.testDefault,
@@ -238,6 +254,37 @@ Display Priority:
 				},
 			},
 			{
+				Name:    "c2c",
+				Aliases: []string{"cache-to-cache"},
+				Usage:   "Run perf c2c on a pod or node to detect cache contention",
+				Action:  app.attachC2C,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "context",
+						Usage: "Kubernetes context to use",
+					},
+					&cli.StringFlag{
+						Name:  "pod",
+						Usage: "Pod name to attach to (mutually exclusive with --node)",
+					},
+					&cli.StringFlag{
+						Name:  "node",
+						Usage: "Node name to attach to (mutually exclusive with --pod)",
+					},
+					&cli.StringFlag{
+						Name:    "namespace",
+						Aliases: []string{"n"},
+						Usage:   "Kubernetes namespace (for pods, default: default)",
+					},
+					&cli.StringFlag{
+						Name:  "perf-image",
+						Usage: "Container image for running perf",
+						Value: defaultPerfImage,
+					},
+					perf.DurationFlag(),
+				},
+			},
+			{
 				Name:   "shell",
 				Usage:  "Open an interactive shell in a privileged pod on the same node as the target pod",
 				Action: app.attachShell,
@@ -295,6 +342,10 @@ func (a *App) testProfile(ctx *cli.Context) error {
 	return a.runTest(ctx, "profile")
 }
 
+func (a *App) testC2C(ctx *cli.Context) error {
+	return a.runTest(ctx, "c2c")
+}
+
 func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 	startTime := time.Now()
 
@@ -305,6 +356,10 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 	var perfCount int
 	var perfEvents []string
 	var perfDetail bool
+	var c2cEvent string
+	var c2cCount int
+	var c2cReportMode string
+	var c2cShowAll bool
 
 	if perfMode == "profile" {
 		perfEvent = ctx.String("event")
@@ -312,6 +367,10 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 	} else if perfMode == "stat" {
 		perfEvents = ctx.StringSlice("event")
 		perfDetail = ctx.Bool("detail")
+	} else if perfMode == "c2c" {
+		// Use default values for c2c
+		c2cReportMode = "stdio"
+		c2cShowAll = false
 	}
 
 	// Get additional arguments passed after flags (or after --)
@@ -577,6 +636,51 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 				finalErr = err
 				return err
 			}
+		} else if perfMode == "c2c" {
+			c2cOpts := perf.C2COptions{
+				Event: c2cEvent,
+				Count: c2cCount,
+			}
+
+			reportOpts := perf.C2CReportOptions{
+				Mode:    c2cReportMode,
+				ShowAll: c2cShowAll,
+			}
+
+			// Store perf options in history
+			history.Perf = &model.Perf{
+				C2C: &model.PerfC2C{
+					Event:      c2cEvent,
+					Count:      c2cCount,
+					ReportMode: c2cReportMode,
+					ShowAll:    c2cShowAll,
+				},
+			}
+
+			err := a.executeRemoteTestInDirWithC2COptions(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, c2cOpts, reportOpts, transformedArgs, &stdoutContent, &stderrContent)
+			if err != nil {
+				a.logger.Error().Err(err).Msg("Remote test execution failed")
+				finalErr = err
+				return err
+			}
+
+			// Process perf c2c data and generate report
+			reportFilename, err := perf.ProcessC2CData(a.logger, sshClient, remoteBaseDir, runDir, reportOpts, history.ID)
+			if err != nil {
+				a.logger.Error().Err(err).Msg("Failed to process c2c data")
+				finalErr = err
+				return err
+			}
+
+			// Get report file size
+			reportPath := filepath.Join(runDir, reportFilename)
+			if reportInfo, err := os.Stat(reportPath); err == nil {
+				history.Artifacts = append(history.Artifacts, model.Artifact{
+					Type: model.ArtifactTypePerfC2CReport,
+					Size: uint64(reportInfo.Size()),
+					File: reportFilename,
+				})
+			}
 		} else {
 			err := a.executeRemoteTestInDir(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, nil, transformedArgs, &stdoutContent, &stderrContent)
 			if err != nil {
@@ -673,6 +777,52 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 				a.logger.Error().Err(err).Msg("Local test execution failed")
 				finalErr = err
 				return err
+			}
+		} else if perfMode == "c2c" {
+			c2cOpts := perf.C2COptions{
+				Event:      c2cEvent,
+				Count:      c2cCount,
+				OutputPath: "perf.data",
+			}
+
+			reportOpts := perf.C2CReportOptions{
+				Mode:    c2cReportMode,
+				ShowAll: c2cShowAll,
+			}
+
+			// Store perf options in history
+			history.Perf = &model.Perf{
+				C2C: &model.PerfC2C{
+					Event:      c2cEvent,
+					Count:      c2cCount,
+					ReportMode: c2cReportMode,
+					ShowAll:    c2cShowAll,
+				},
+			}
+
+			err := a.executeLocalTestWithC2COptions(testBinary, c2cOpts, reportOpts, transformedArgs, &stdoutContent, &stderrContent)
+			if err != nil {
+				a.logger.Error().Err(err).Msg("Local test execution failed")
+				finalErr = err
+				return err
+			}
+
+			// Convert perf.data to c2c report
+			reportFilename, err := perf.ConvertPerfC2CToReport(a.logger, "perf.data", runDir, reportOpts, history.ID)
+			if err != nil {
+				a.logger.Error().Err(err).Msg("Failed to generate c2c report")
+				finalErr = err
+				return err
+			}
+
+			// Get report file size and register artifact
+			reportPath := filepath.Join(runDir, reportFilename)
+			if reportInfo, err := os.Stat(reportPath); err == nil {
+				history.Artifacts = append(history.Artifacts, model.Artifact{
+					Type: model.ArtifactTypePerfC2CReport,
+					Size: uint64(reportInfo.Size()),
+					File: reportFilename,
+				})
 			}
 		} else {
 			err := a.executeLocalTest(testBinary, nil, transformedArgs, &stdoutContent, &stderrContent)

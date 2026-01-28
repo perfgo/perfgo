@@ -63,10 +63,12 @@ type Target struct {
 
 // Perf contains performance profiling options that were used
 type Perf struct {
-	// Record options (for profile mode) - only one of Record or Stat should be set
+	// Record options (for profile mode) - only one of Record, Stat, or C2C should be set
 	Record *PerfRecord `json:"record,omitempty"`
-	// Stat options (for stat mode) - only one of Record or Stat should be set
+	// Stat options (for stat mode) - only one of Record, Stat, or C2C should be set
 	Stat *PerfStat `json:"stat,omitempty"`
+	// C2C options (for cache-to-cache mode) - only one of Record, Stat, or C2C should be set
+	C2C *PerfC2C `json:"c2c,omitempty"`
 }
 
 // PerfRecord contains perf record options that were used
@@ -91,6 +93,22 @@ type PerfStat struct {
 	Duration int `json:"duration,omitempty"`
 	// Whether detailed statistics were enabled
 	Detail bool `json:"detail,omitempty"`
+}
+
+// PerfC2C contains perf c2c options that were used
+type PerfC2C struct {
+	// Event to record (e.g., "mem-loads", "mem-stores")
+	Event string `json:"event,omitempty"`
+	// Event period to sample
+	Count int `json:"count,omitempty"`
+	// Process IDs that were profiled
+	PIDs []string `json:"pids,omitempty"`
+	// Duration in seconds (for attach mode)
+	Duration int `json:"duration,omitempty"`
+	// Report mode used (stdio or tui)
+	ReportMode string `json:"report_mode,omitempty"`
+	// Whether show-all flag was used
+	ShowAll bool `json:"show_all,omitempty"`
 }
 
 // TestRun contains test-specific fields
@@ -121,6 +139,7 @@ const (
 	ArtifactTypeTestOutput
 	ArtifactTypePerfStat
 	ArtifactTypePerfStatDetailed
+	ArtifactTypePerfC2CReport
 	ArtifactTypeStdout
 	ArtifactTypeStderr
 )
