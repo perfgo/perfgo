@@ -249,8 +249,6 @@ perfgo test cache-to-cache -- ./ -bench=NoPadding -benchmem -benchtime=10s -run=
 
 4. **Perfect Split**: The nearly equal distribution (49.62% vs 50.38%) indicates two separate cores are hammering different fields at similar rates, causing continuous cache line bouncing.
 
-This is textbook false sharing that padding fixes by giving each counter its own cache line, eliminating the 2,000+ cache invalidations during the benchmark.
-
 </details>
 
 ## Example Results
