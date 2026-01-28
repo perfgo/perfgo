@@ -1,128 +1,196 @@
-# perfgo
+# PerfGo
 
-A Go CLI tool for running and profiling Go tests with Linux `perf` integration.
+<!-- TODO: Add logo here -->
+<!-- ![PerfGo Logo](assets/logo.png) -->
 
-## Features
+> Bring hardware performance insights to the Go ecosystem
 
-- **Remote test execution**: Run tests on remote hosts via SSH with automatic cross-compilation
-- **perf integration**: Wrap tests with `perf record` to capture hardware performance counters
-- **Automatic symbolization**: Converts perf data to pprof format with full binary paths for automatic symbol resolution
-- **Test artifact archiving**: Saves profiles, binaries, and git metadata for later analysis
-- **Sample merging**: Reduces profile size by merging duplicate stack traces
+A tool to manage benchmarking and performance measurements of your Go projects using Linux's `perf` command. PerfGo leverages CPU Performance Monitoring Unit (PMU) counters to provide deep insights into cache behavior, branch prediction, and other microarchitectural events.
 
-## Installation
+<!-- TODO: Add demo video/gif here -->
+<!-- ![Demo](assets/demo.gif) -->
+<!-- Or use: <video src="assets/demo.mp4" controls></video> -->
 
-```bash
-go install github.com/perfgo/perfgo@latest
-```
 
-Or build from source:
+## Execution Model
 
-```bash
-git clone https://github.com/perfgo/perfgo.git
-cd perfgo
-go build -o perfgo .
-```
+PerfGo supports two main execution modes:
 
-## Usage
+### Test Mode
 
-### Local test execution
+Builds and executes Go test/benchmark packages with optional performance monitoring. Supports two executors:
+
+- **Local executor** - Run tests on the local Linux system
+- **Remote executor** - Build locally and execute on a remote system via SSH
+
+Enable performance collection by adding the `stat`, `profile`, or `cache-to-cache` subcommands to your test runs.
 
 ```bash
-# Run tests locally with perf profiling
-perfgo test --event cycles:u ./examples/false-sharing
+# Local execution - collect statistics
+perfgo test stat -- ./examples/false-sharing -bench=. -benchmem -benchtime=10000000x -run=^$
 
-# View the generated profile
-go tool pprof perf.pb.gz
+# Local execution - generate profile
+perfgo test profile -e cache-loads -- ./examples/false-sharing -bench=. -benchmem -benchtime=10000000x -run=^$
+
+# Remote execution - run on Linux server over SSH
+perfgo test stat --remote-host user@remote.example.com -- ./package -bench=.
+
+# Cache-to-cache analysis for false sharing detection
+perfgo test cache-to-cache -- ./examples/false-sharing -bench=NoPadding -benchtime=10s -run=^$
 ```
 
-### Remote test execution
+### Attach Mode
+
+Collect performance data from a running Kubernetes pod by deploying a sidecar container that attaches to the target process. Supports all three analysis modes (`stat`, `profile`, `cache-to-cache`).
 
 ```bash
-# Run tests on remote Linux host
-perfgo test --remote-host user@server --event cycles:u ./examples/false-sharing
+# Collect statistics from a pod for 10 seconds
+perfgo attach stat --pod my-app-pod --namespace production --duration 10
 
-# Keep remote artifacts for debugging
-perfgo test --remote-host user@server --keep ./examples/false-sharing
+# Profile cache misses on a specific node
+perfgo attach profile --node worker-01 --event cache-misses --duration 30
+
+# Detect false sharing in a running pod
+perfgo attach cache-to-cache --pod my-app-pod -n production --duration 15
+
+# Open an interactive shell for manual perf commands
+perfgo attach shell --pod my-app-pod --namespace production
 ```
 
-### Available perf events
+## Collection Modes
 
-Common events to profile:
-- `cycles:u` - CPU cycles (user-space)
-- `instructions:u` - Instructions executed
-- `cache-misses` - Cache misses
-- `L1-dcache-load-misses` - L1 data cache load misses
+PerfGo supports three analysis modes:
+
+- **stat** - Collect hardware counter statistics for your Go tests
+- **profile** - Generate flame graphs showing where PMU events occur in your code
+- **cache-to-cache** - Analyze cache line transfers between CPU cores
+
+## Historical Data
+
+PerfGo stores all benchmark results and performance data in the `.perfgo` directory at your project root. This allows you to revisit and compare previous benchmark runs:
+
+- `perfgo list` - View all stored benchmark runs
+- `perfgo view` - Open and analyze a specific benchmark result
+
+## Typical Workflow
+
+A recommended approach for performance investigation after you notice CPU contention in your service benchmark:
+
+1. **Establish baseline** - Run `stat` to get a hardware performance overview
+1. **Identify bottlenecks** - Look for high cache miss rates, branch mispredictions, or low IPC (instructions per cycle)
+1. **Profile hot spots** - Use `perfgo test profile -e <event>` to see which source code lines contribute to the bottleneck
+1. **Investigate cache issues** - If cache misses are high, run `perfgo test cache-to-cache` to detect false sharing or contention
+1. **Compare optimizations** - Re-run the same tests after code changes to validate improvements
+
+## About PMU Counters
+
+Performance Monitoring Unit (PMU) counters are hardware registers in modern CPUs that track microarchitectural events like cache misses, branch mispredictions, and instruction execution. These counters provide direct insight into how your code interacts with the CPU's internal architecture.
+
+**Accuracy**: PMU counters offer high-precision measurements with minimal overhead. However, some events may be subject to:
+- **Sampling skid** - A small delay between when an event occurs and when it's recorded
+- **Multiplexing** - On systems with more events than physical counters, events are time-shared
+- **Approximation** - Some complex events are estimated rather than directly counted
+
+Despite these limitations, PMU counters remain the most accurate way to understand hardware-level performance characteristics of your code.
+
+### Event specification
+
+PerfGo allows you to specify which PMU events to monitor. Common events include:
+
+**CPU Performance:**
+- `cycles` - CPU cycles elapsed
+- `instructions` - Instructions executed
 - `branches` - Branch instructions
-- `branch-misses` - Branch mispredictions
+- `branch-misses` - Mispredicted branches
 
-See `perf list` for all available events on your system.
+**Cache Events:**
+- `cache-references` - Total cache accesses
+- `cache-misses` - Cache misses at all levels
+- `L1-dcache-loads` - L1 data cache loads
+- `L1-dcache-load-misses` - L1 data cache load misses
+- `LLC-loads` - Last Level Cache loads
+- `LLC-load-misses` - Last Level Cache load misses
 
-## Test Artifact Archiving
+**Memory Access:**
+- `dTLB-loads` - Data TLB loads
+- `dTLB-load-misses` - Data TLB load misses
 
-When running tests with `--event`, perfgo automatically archives results to `~/perfgo-profiles/`:
+**Event Modifiers:**
 
-```
-~/perfgo-profiles/
-  └── <repo-name>/
-      └── <relative-path>/
-          └── <timestamp>-<commit>/
-              ├── perf.pb.gz          # pprof profile (paths rewritten to archive)
-              ├── <test-binary>       # test binary with symbols
-              ├── perf.script         # raw perf script output
-              └── git-info.txt        # git metadata
-```
+Events can be refined with suffix modifiers:
+- `:u` - Count only user-space events
+- `:k` - Count only kernel-space events
+- `:p` - Set precise event sampling (PEBS on Intel)
 
-**Self-contained profiles**: Binary paths in the pprof profile are automatically rewritten to point to the archived test binary. This means `go tool pprof` works immediately without manual path specification.
+Example: `cache-misses:u` counts only user-space cache misses.
 
-**Example:**
+**Raw Hardware Events:**
+
+You can also specify raw PMU events using hexadecimal values from your CPU vendor's documentation:
+
 ```bash
-./perfgo test --event cycles:u ./pkg/server
+# Intel: Monitor event 0x2e (LLC references), umask 0x41
+perfgo test profile -e r412e -- ./package -bench=.
 
-# Creates archive at:
-# ~/perfgo-profiles/myproject/pkg/server/20240117-154523-a1b2c3d4/
+# View with perf list to find available events
+perf list
 ```
 
-**Later analysis:**
-```bash
-# Navigate to archived profile
-cd ~/perfgo-profiles/myproject/pkg/server/20240117-154523-a1b2c3d4
+**CPU Vendor Documentation:**
+- [Intel 64 and IA-32 Architectures Software Developer Manuals](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) - Volume 3B, Chapter 20 contains PMU event listings
+- [AMD Processor Programming Reference](https://www.amd.com/en/search/documentation/hub.html) - Search for "PPR" for your specific CPU family
+- [ARM PMU Event Specifications](https://developer.arm.com/documentation/102073/0100/PMU-events)
 
-# Analyze with pprof (automatically finds test binary for symbolization)
-go tool pprof perf.pb.gz
 
-# Or use web UI
-go tool pprof -http=:8080 perf.pb.gz
-```
+## Concete examples
 
-See [ARCHIVE.md](ARCHIVE.md) for detailed documentation on archive format and management.
+PerfGo includes three comprehensive examples demonstrating different performance analysis techniques:
 
-## How It Works
+### 1. [False Sharing](examples/false-sharing/)
+Demonstrates how cache line contention between CPU cores causes dramatic performance degradation. Shows how cache-to-cache analysis can pinpoint false sharing issues, and how padding can provide a 3.4x speedup.
 
-1. **Build**: Compiles test binary for target architecture (with `CGO_ENABLED=0` for portability)
-2. **Sync**: Uses git to transfer working tree to remote host (if remote execution)
-3. **Execute**: Runs tests wrapped with `perf record` (if `--event` specified)
-4. **Convert**: Parses `perf script` output and converts to pprof format
-5. **Archive**: Saves profile, binary, and git info to `~/perfgo-profiles/` for later analysis
+### 2. [Branch Prediction](examples/branch-prediction/)
+Explores the impact of branch predictability on CPU performance. Compares predictable vs. random branching patterns and demonstrates branchless alternatives, showing how branch misses can reduce IPC from 5.28 to 0.70.
 
-## Examples
+### 3. [Data Locality](examples/data-locality/)
+Compares Array of Structs (AoS) vs. Struct of Arrays (SoA) memory layouts. Demonstrates how data layout affects cache efficiency, with SoA providing 1.77x better performance and 8.62x fewer cache misses.
 
-See [examples/false-sharing/](examples/false-sharing/) for a complete example demonstrating cache false sharing detection with hardware performance counters.
-
-## Documentation
-
-- [README.md](README.md) - Main documentation (this file)
-- [ARCHIVE.md](ARCHIVE.md) - Archive format and management
-- [AGENTS.md](AGENTS.md) - Guide for AI agents working with this codebase
-- [perfscript/README.md](perfscript/README.md) - Parser documentation
-- [examples/false-sharing/README.md](examples/false-sharing/README.md) - False sharing detection example
+Each example includes step-by-step workflows using `perfgo test stat`, `perfgo test profile`, and `perfgo test cache-to-cache` commands.
 
 ## Requirements
 
-- Go 1.24+
-- Linux `perf` (for profiling)
-- SSH access to remote hosts (for remote execution)
+**General:**
+- Go
+- LLVM binutils (llvm-symbolizer and llvm-objdump)
+
+**Test mode - Local executor:**
+- Linux system with `perf` installed
+
+**Test mode - Remote executor:**
+- SSH client (local)
+- Linux system with `perf` and SSH server (remote)
+
+**Attach mode:**
+- kubectl
+- Access to a Kubernetes cluster with appropriate permissions
 
 ## License
 
-See LICENSE file for details.
+[Apache 2.0](LICENSE)
+
+## Acknowledgements
+
+PerfGo builds upon the powerful Linux `perf` subsystem and the Go ecosystem's excellent tooling.
+
+- The Linux perf team for building the foundation this tool relies on
+- The Go team for excellent profiling and tooling infrastructure
+
+This project was developed with significant assistance from AI agents. If you notice any issues, misattributions, or concerns about the workflow, please reach out via GitHub Issues/Pull Requests.
+
+## Learn more about this
+
+- [Linux perf Wiki](https://perf.wiki.kernel.org/) - Comprehensive documentation on perf
+- [Intel 64 and IA-32 Architectures Developer Manuals](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) - Deep dive into x86 PMU events
+- [Brendan Gregg's perf Examples](https://www.brendangregg.com/perf.html) - Practical perf usage patterns
+- [Andi Kleen's pmu-tools](https://github.com/andikleen/pmu-tools) - Advanced PMU analysis tools
+
