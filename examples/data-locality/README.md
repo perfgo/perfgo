@@ -20,17 +20,19 @@ persons := []Person{{Name: "Alice", Age: 30}, {Name: "Bob", Age: 25}}
 
 **Memory layout:**
 ```
-[Name|Age|Placeholder|Name|Age|Placeholder|Name|Age|Placeholder|...]
- <---  Person 0  ---> <---  Person 1  ---> <---  Person 2  --->
+[Name(ptr+len)|Age|Placeholder|Name(ptr+len)|Age|Placeholder|...]
+ <---     Person 0      ---> <---     Person 1      --->
 ```
 
+**Note:** In Go, a `string` is a 16-byte header (pointer + length) stored in the struct. The actual string data ("Alice", "Bob", etc.) is stored separately on the heap. So `Name` here represents the string header, not the string content itself.
+
 When calculating average age, the CPU must:
-1. Load entire Person struct (~80 bytes) into cache
+1. Load entire Person struct (~88 bytes: 16-byte string header + 8-byte int + 64-byte array) into cache
 2. Extract only the Age field (8 bytes)
-3. Discard the unused Name and Placeholder fields
+3. Discard the unused Name header and Placeholder fields
 4. Repeat for next person
 
-**Cache efficiency:** ~10% (8 bytes used / 80 bytes loaded)
+**Cache efficiency:** ~9% (8 bytes used / 88 bytes loaded)
 
 ## Struct of Arrays (SoA) - Cache-Friendly Approach
 
@@ -49,15 +51,17 @@ db := PersonDatabase{
 
 **Memory layout:**
 ```
-Names:        [Alice|Bob|Charlie|...]
-Ages:         [30|25|35|...]
-Placeholders: [64B|64B|64B|...]
+Names:        [ptr+len|ptr+len|ptr+len|...]  (16 bytes each, pointing to string data)
+Ages:         [30|25|35|...]                  (8 bytes each)
+Placeholders: [64B|64B|64B|...]               (64 bytes each)
 ```
+
+**Note:** The Names slice stores string headers (pointer + length), not the actual string content. The actual string data is stored separately on the heap.
 
 When calculating average age, the CPU:
 1. Only loads the Ages array
-2. Processes contiguous integers
-3. Never touches Names or Placeholders
+2. Processes contiguous integers (8 bytes each)
+3. Never touches Names or Placeholders arrays
 
 **Cache efficiency:** ~100% (all loaded data is used)
 
@@ -65,8 +69,7 @@ When calculating average age, the CPU:
 
 | File | Description |
 |------|-------------|
-| `data_layout.go` | Core implementation with `Person` (AoS) vs `PersonDatabase` (SoA) |
-| `data_layout_test.go` | Benchmarks demonstrating the performance impact |
+| `data_locality_test.go` | Core implementation with `Person` (AoS) vs `PersonDatabase` (SoA) and benchmarks demonstrating the performance impact |
 
 ## Running Benchmarks
 
