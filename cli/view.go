@@ -23,6 +23,18 @@ func removeFirstDashDash(in []string) []string {
 	return in
 }
 
+func isValidHexString(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 func parseViewArgs(in []string) (idArg string, pprofArgs []string) {
 	if len(in) == 0 {
 		return "0", nil
@@ -75,12 +87,9 @@ func (a *App) view(ctx *cli.Context) error {
 
 	// Parse argument to find the target entry
 	var targetEntry *history.Entry
-	if parsed, err := strconv.ParseInt(arg, 10, 64); err == nil {
-		// It's a number
-		if parsed > 0 {
-			// Positive integers are not allowed
-			return fmt.Errorf("invalid index: %s (use 0 for last, -1 for second-to-last, -2 for third-to-last, etc.)", arg)
-		}
+
+	// Try to parse as integer first
+	if parsed, err := strconv.ParseInt(arg, 10, 64); err == nil && parsed <= 0 {
 		// 0 or negative integer: count from the end (0=last, -1=second-to-last, -2=third-to-last, etc.)
 		index := int(-parsed) // Convert to positive index (0 -> 0, -1 -> 1, -2 -> 2)
 		if index >= len(historyEntries) {
@@ -88,6 +97,11 @@ func (a *App) view(ctx *cli.Context) error {
 		}
 		targetEntry = &historyEntries[index]
 	} else {
+		// Validate that it's a valid hex string before treating as ID prefix
+		if !isValidHexString(arg) {
+			return fmt.Errorf("invalid argument: %s (use 0 for last, -1 for second-to-last, or a valid hex ID prefix)", arg)
+		}
+
 		// Treat as hex ID prefix
 		hexID := strings.ToLower(arg)
 		found := false

@@ -80,6 +80,12 @@ func TestParseViewArgs(t *testing.T) {
 			wantPprofArgs: []string{},
 		},
 		{
+			name:          "only ID - digit-only hex string",
+			in:            []string{"1234"},
+			wantID:        "1234",
+			wantPprofArgs: []string{},
+		},
+		{
 			name:          "only pprof args",
 			in:            []string{"-http=:8080"},
 			wantID:        "0",
