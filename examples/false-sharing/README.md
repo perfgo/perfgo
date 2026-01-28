@@ -33,9 +33,17 @@ Cache Line (64 bytes)
 
 ```bash
 # Run just the benchmarks
-go test -bench=. -benchmem
+$ go test ./ -bench=. -benchmem -benchtime=10000000x -run=^$
+goos: darwin
+goarch: arm64
+pkg: github.com/perfgo/perfgo/examples/false-sharing
+cpu: Apple M2 Max
+BenchmarkNoPadding-12      	10000000	         0.6496 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWithPadding-12    	10000000	         0.1892 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/perfgo/perfgo/examples/false-sharing	0.193s
 
-# Run the benchmarks each and collect stats
+# Run the benchmarks each and collect perf stat -d results
 $ perfgo test stat -- ./ -bench=WithNoPadding -benchmem -benchtime=10000000x -run=^$
 
         25,604,929      task-clock                       #    1.794 CPUs utilized
