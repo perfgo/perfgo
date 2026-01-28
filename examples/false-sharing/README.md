@@ -9,151 +9,114 @@ False sharing occurs when multiple CPU cores modify variables that reside on the
 ```
 Cache Line (64 bytes)
 ┌────────────────────────────────────────────────────────────────┐
-│ counter[0] │ counter[1] │ counter[2] │ counter[3] │ ... │
-│  (8 bytes) │  (8 bytes) │  (8 bytes) │  (8 bytes) │     │
+│ RequestsTotal │  CronJobRuns  │      (unused space)           │
+│   (8 bytes)   │   (8 bytes)   │        (48 bytes)             │
 └────────────────────────────────────────────────────────────────┘
-     ▲              ▲
-     │              │
-   Core 0        Core 1
-   writes        writes
-     │              │
-     └──────────────┘
-        Cache line bounces
-        between cores!
+       ▲                ▲
+       │                │
+     Core 0          Core 1
+     writes          writes
+       │                │
+       └────────────────┘
+          Cache line bounces
+          between cores!
 ```
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `false_sharing.go` | Core implementation with `SharedCounters` (bad) vs `PaddedCounters` (good) |
-| `false_sharing_test.go` | Unit tests for correctness and memory layout verification |
-| `benchmark_test.go` | Micro benchmarks demonstrating the performance impact |
+| `false_sharing.go` | Core implementation with `Metrics` (bad) vs `PaddedMetrics` (good) |
+| `benchmark_test.go` | Benchmarks demonstrating the performance impact |
 
 ## Running Benchmarks
 
 ```bash
-# Run all benchmarks
+# Run just the benchmarks
 go test -bench=. -benchmem
 
-# Run with multiple iterations for statistical significance
-go test -bench=. -benchmem -count=5
+# Run the benchmarks each and collect stats
+$ perfgo test stat -- ./ -bench=WithNoPadding -benchmem -benchtime=10000000x -run=^$
 
-# Compare specific benchmarks
-go test -bench='BenchmarkFalseSharing_8Goroutines|BenchmarkPadded_8Goroutines' -benchmem
+        25,604,929      task-clock                       #    1.794 CPUs utilized
+               231      context-switches                 #    9.022 K/sec
+                17      cpu-migrations                   #  663.935 /sec
+             1,372      page-faults                      #   53.583 K/sec
+>>>     58,983,263      instructions                     #    0.72  insn per cycle
+>>>                                                      #    0.15  stalled cycles per insn     (67.29%)
+        82,303,201      cycles                           #    3.214 GHz                         (50.31%)
+         8,950,006      stalled-cycles-frontend          #   10.87% frontend cycles idle        (65.70%)
+        13,286,491      branches                         #  518.904 M/sec                       (83.74%)
+           109,291      branch-misses                    #    0.82% of all branches             (84.38%)
+        30,202,774      L1-dcache-loads                  #    1.180 G/sec                       (83.01%)
+           530,830      L1-dcache-load-misses            #    1.76% of all L1-dcache accesses   (79.17%)
+
+       0.014275218 seconds time elapsed
+
+       0.021153000 seconds user
+       0.005875000 seconds sys
+
+$ perfgo test stat -- ./ -bench=WithPadding -benchmem -benchtime=10000000x -run=^$
+
+        11,131,960      task-clock                       #    1.769 CPUs utilized
+               220      context-switches                 #   19.763 K/sec
+                11      cpu-migrations                   #  988.146 /sec
+             1,398      page-faults                      #  125.584 K/sec
+>>>     83,744,316      instructions                     #    3.68  insn per cycle
+>>>                                                      #    0.10  stalled cycles per insn     (23.52%)
+        22,729,257      cycles                           #    2.042 GHz                         (55.66%)
+         8,387,353      stalled-cycles-frontend          #   36.90% frontend cycles idle        (84.99%)
+        14,075,774      branches                         #    1.264 G/sec                       (97.90%)
+            95,035      branch-misses                    #    0.68% of all branches
+        19,953,683      L1-dcache-loads                  #    1.792 G/sec                       (94.27%)
+           253,134      L1-dcache-load-misses            #    1.27% of all L1-dcache accesses   (66.98%)
+
+       0.006291924 seconds time elapsed
+
+       0.009082000 seconds user
+       0.003652000 seconds sys
+
+# Analysis: Nothing clearly is pointing to false sharing here, given that both
+# benchmarks, do the exact same work, we can significant decrease in time elasped
+# and L1-dcache-loads for the same amount of work. Also the 
+
+# Run the benchmarks and collect cache-miss events
+$ perfgo test profile -e cache-loads -- ./ -bench=. -benchmem -benchtime=10000000x -run=^$
+# Result see: https://flamegraph.com/share/fb224270-fc55-11f0-be3c-0235fc700989
+
+# To find the false sharing without knowing about it, perf c2c can provide useful pointers
+# TODO: Add something about c2c analysis, once the subcommand exists
 ```
 
-## Example Results (Apple M2 Max, 12 cores)
+## Example Results
 
 | Benchmark | ns/op | Speedup |
 |-----------|-------|---------|
-| `FalseSharing_8Goroutines` | ~38-40 | baseline |
-| `Padded_8Goroutines` | ~4-5 | **~9x faster** |
-| `AdjacentCounters_NoPadding` | ~13.5 | baseline |
-| `AdjacentCounters_WithPadding` | ~5.2 | **2.6x faster** |
+| `BenchmarkNoPadding` | baseline | 1x |
+| `BenchmarkWithPadding` | significantly faster | 2-10x depending on cores |
 
 ## The Fix: Cache Line Padding
 
 ```go
-// BAD: Adjacent counters share cache lines
-type SharedCounters struct {
-    counters [8]int64  // All 64 bytes fit in ONE cache line!
+// BAD: Adjacent fields share cache lines
+type Metrics struct {
+    RequestsTotal int64  // These two fields fit in ONE cache line!
+    CronJobRuns   int64
 }
 
-// GOOD: Each counter gets its own cache line
-type PaddedCounter struct {
-    value int64
-    _     [56]byte  // Padding to fill 64-byte cache line
-}
-
-type PaddedCounters struct {
-    counters [8]PaddedCounter  // Each counter on separate cache line
+// GOOD: Each field gets its own cache line via padding
+type PaddedMetrics struct {
+    RequestsTotal int64
+    _             [56]byte  // Padding to fill 64-byte cache line
+    CronJobRuns   int64
+    _             [56]byte  // Padding to fill 64-byte cache line
 }
 ```
 
-## Detecting False Sharing with Performance Counters
+## TODO:  Detecting False Sharing with Performance Counters
 
-False sharing manifests as excessive cache coherency traffic. Use these hardware performance counters to detect it:
-
-### Linux (perf)
-
-```bash
-# Primary counters for detecting false sharing
-perf stat -e L1-dcache-load-misses,L1-dcache-loads,\
-l2_rqsts.all_demand_data_rd,l2_rqsts.demand_data_rd_miss,\
-offcore_response.demand_data_rd.l3_miss.snoop_hitm \
-./your_program
-
-# Intel-specific: HITM (Hit Modified) - THE key indicator
-# High HITM count = cache lines bouncing between cores in Modified state
-perf stat -e mem_load_l3_hit_retired.xsnp_hitm,\
-mem_load_l3_hit_retired.xsnp_miss \
-./your_program
-
-# Use perf c2c for detailed false sharing analysis (Linux 4.10+)
-perf c2c record ./your_program
-perf c2c report
 ```
-
-### Key Performance Counters
-
-| Counter | What it measures | False sharing indicator |
-|---------|------------------|------------------------|
-| `mem_load_l3_hit_retired.xsnp_hitm` | Loads that hit in L3 but another core had modified data | **Primary indicator** - high values suggest false sharing |
-| `l2_rqsts.all_rfo` | Read-for-ownership requests (write intent) | High RFO with low actual stores = contention |
-| `offcore_response.*.snoop_hitm` | Off-core requests hitting modified lines | Cross-core cache line bouncing |
-| `L1-dcache-load-misses` | L1 data cache misses | Elevated misses during concurrent access |
-| `machine_clears.memory_ordering` | Pipeline clears due to memory ordering | Memory ordering conflicts |
-
-### macOS (Instruments / DTrace)
-
-```bash
-# Use Instruments with "Counters" template
-# Look for:
-# - L1D_CACHE_MISS_LD
-# - L1D_CACHE_MISS_ST
-# - BUS_ACCESS (memory bus transactions)
-
-# Or use powermetrics for high-level cache stats
-sudo powermetrics --samplers cpu_power -i 1000
-```
-
-### Intel VTune
-
-```bash
-# Use the "Memory Access" analysis
-vtune -collect memory-access ./your_program
-
-# Look for:
-# - Contested Accesses (direct indicator)
-# - Remote Cache Accesses
-# - LLC Miss Count
-```
-
-### What to Look For
-
-1. **High HITM ratio**: `snoop_hitm` / total loads > 1% is suspicious
-2. **Scaling problems**: Performance gets *worse* with more cores
-3. **High L1 miss rate** during concurrent access to "independent" data
-4. **Memory bandwidth saturation** despite low actual data transfer needs
-
-### Example: Profiling This Code
-
-```bash
-# On Linux with perf
-cd examples/false-sharing
-
-# Profile the false sharing version
-perf stat -e cycles,instructions,L1-dcache-load-misses,\
-l2_rqsts.demand_data_rd_miss \
-go test -bench=BenchmarkNoPadding -benchtime=5s
-
-# Profile the padded version  
-perf stat -e cycles,instructions,L1-dcache-load-misses,\
-l2_rqsts.demand_data_rd_miss \
-go test -bench=BenchmarkWithPadding -benchtime=5s
-
-# Compare the cache miss rates!
+Add a c2c subcommand to perfgo
 ```
 
 ## Common Scenarios Where False Sharing Occurs
@@ -168,7 +131,6 @@ go test -bench=BenchmarkWithPadding -benchtime=5s
 
 1. **Pad hot variables** to cache line boundaries when accessed by multiple cores
 2. **Group read-only and read-write data** separately
-3. **Use `sync.Pool`** instead of per-goroutine arrays when possible
 4. **Profile first** - padding increases memory usage, only apply where needed
 5. **Consider `runtime.GOMAXPROCS`** - false sharing impact scales with core count
 
