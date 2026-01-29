@@ -300,7 +300,13 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 
 	// Create SSH client to the perf pod
 	a.logger.Info().Msg("Creating SSH client to perf pod")
-	proxyCmd := fmt.Sprintf("kubectl exec -i -n %s %s -- bash -c '/usr/sbin/sshd -i 2> /dev/null'", namespace, perfPodName)
+
+	// Build kubectl proxy command with optional context
+	contextArg := ""
+	if kubeContext != "" {
+		contextArg = fmt.Sprintf("--context %s ", kubeContext)
+	}
+	proxyCmd := fmt.Sprintf("kubectl %sexec -i -n %s %s -- bash -c '/usr/sbin/sshd -i 2> /dev/null'", contextArg, namespace, perfPodName)
 	sshHost := fmt.Sprintf("root@%s", perfPodName)
 
 	sshClient, err := ssh.New(a.logger, sshHost,
