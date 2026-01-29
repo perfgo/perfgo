@@ -184,6 +184,7 @@ PerfGo builds upon the powerful Linux `perf` subsystem and the Go ecosystem's ex
 
 - The Linux perf team for building the foundation this tool relies on
 - The Go team for excellent profiling and tooling infrastructure
+- [Renee French](https://reneefrench.blogspot.com/) for an iconic Go mascot
 
 This project was developed with significant assistance from AI agents. If you notice any issues, misattributions, or concerns about the workflow, please reach out via GitHub Issues/Pull Requests.
 
@@ -193,4 +194,7 @@ This project was developed with significant assistance from AI agents. If you no
 - [Intel 64 and IA-32 Architectures Developer Manuals](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) - Deep dive into x86 PMU events
 - [Brendan Gregg's perf Examples](https://www.brendangregg.com/perf.html) - Practical perf usage patterns
 - [Andi Kleen's pmu-tools](https://github.com/andikleen/pmu-tools) - Advanced PMU analysis tools
+- [Bryan Boreham's talk CPU hardware counters](https://www.youtube.com/watch?v=ipoXGP3c6Uk)
+- [Denis Bakhvalov's PMU counters and profiling basics](https://easyperf.net/blog/2018/06/01/PMU-counters-and-profiling-basics)
+- [Sergey Podgorny's CPU cache basics](https://dev.to/larapulse/cpu-cache-basics-57ej)
 
