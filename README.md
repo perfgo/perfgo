@@ -1,16 +1,12 @@
 # PerfGo
 
-<!-- TODO: Add logo here -->
-<!-- ![PerfGo Logo](assets/logo.png) -->
+![PerfGo Logo](https://raw.githubusercontent.com/perfgo/perfgo/refs/heads/assets/assets/logo.png)
 
 > Bring hardware performance insights to the Go ecosystem
 
 A tool to manage benchmarking and performance measurements of your Go projects using Linux's `perf` command. PerfGo leverages CPU Performance Monitoring Unit (PMU) counters to provide deep insights into cache behavior, branch prediction, and other microarchitectural events.
 
-<!-- TODO: Add demo video/gif here -->
-<!-- ![Demo](assets/demo.gif) -->
-<!-- Or use: <video src="assets/demo.mp4" controls></video> -->
-
+![Demo](https://raw.githubusercontent.com/perfgo/perfgo/refs/heads/assets/assets/perfgo-demo-video.gif)
 
 ## Execution Model
 
