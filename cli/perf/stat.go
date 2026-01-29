@@ -55,15 +55,15 @@ func BuildStatArgs(opts StatOptions) []string {
 // It reuses BuildStatArgs and joins the arguments with proper shell escaping.
 func BuildStatCommand(opts StatOptions) string {
 	args := BuildStatArgs(opts)
-	
+
 	// Build command with proper shell escaping
 	parts := make([]string, 0, len(args)+1)
 	parts = append(parts, "perf")
-	
+
 	for _, arg := range args {
 		parts = append(parts, shellescape.Quote(arg))
 	}
-	
+
 	return strings.Join(parts, " ")
 }
 

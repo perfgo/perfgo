@@ -87,12 +87,12 @@ type Container struct {
 
 // PodStatus contains pod status information.
 type PodStatus struct {
-	Phase             string            `json:"phase"`
-	Conditions        []PodCondition    `json:"conditions,omitempty"`
-	PodIP             string            `json:"podIP,omitempty"`
-	HostIP            string            `json:"hostIP,omitempty"`
-	StartTime         *time.Time        `json:"startTime,omitempty"`
-	ContainerStatuses []ContainerStatus `json:"containerStatuses,omitempty"`
+	Phase                 string            `json:"phase"`
+	Conditions            []PodCondition    `json:"conditions,omitempty"`
+	PodIP                 string            `json:"podIP,omitempty"`
+	HostIP                string            `json:"hostIP,omitempty"`
+	StartTime             *time.Time        `json:"startTime,omitempty"`
+	ContainerStatuses     []ContainerStatus `json:"containerStatuses,omitempty"`
 	InitContainerStatuses []ContainerStatus `json:"initContainerStatuses,omitempty"`
 }
 

@@ -73,15 +73,15 @@ func BuildRecordArgs(opts RecordOptions) []string {
 // It reuses BuildRecordArgs and joins the arguments with proper shell escaping.
 func BuildRecordCommand(opts RecordOptions) string {
 	args := BuildRecordArgs(opts)
-	
+
 	// Build command with proper shell escaping
 	parts := make([]string, 0, len(args)+1)
 	parts = append(parts, "perf")
-	
+
 	for _, arg := range args {
 		parts = append(parts, shellescape.Quote(arg))
 	}
-	
+
 	return strings.Join(parts, " ")
 }
 
@@ -372,7 +372,7 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 			var foundPID string
 			for _, pid := range pids {
 				procPath := fmt.Sprintf("/proc/%s/root%s", pid, remotePath)
-				
+
 				// Check if binary exists via /proc/<pid>/root
 				checkCmd := fmt.Sprintf("test -f %s && echo exists", procPath)
 				output, _, err := sshClient.RunCommand(checkCmd)

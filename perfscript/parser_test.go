@@ -65,7 +65,7 @@ perfgo.test.lin  223225 7187035.622644:         34 L1-dcache-load-misses:
 	require.Equal(t, "count", prof.SampleType[0].Unit)
 	require.Equal(t, "L1-dcache-load-misses", prof.SampleType[1].Type)
 	require.Equal(t, "count", prof.SampleType[1].Unit)
-	
+
 	// With merging, samples with identical stacks should be combined
 	require.Len(t, prof.Sample, 1, "Identical stacks should be merged into one sample")
 	require.Equal(t, []int64{14, 34}, prof.Sample[0].Value, "Merged sample should have both event counts")
