@@ -46,8 +46,8 @@ func New() *App {
 			},
 			Flags: []cli.Flag{
 				&cli.BoolFlag{
-					Name:    "verbose",
-					Usage:   "Enable verbose (debug) logging",
+					Name:  "verbose",
+					Usage: "Enable verbose (debug) logging",
 				},
 			},
 			Before: func(ctx *cli.Context) error {
@@ -160,11 +160,11 @@ func New() *App {
 		},
 	})
 	app.cli.Commands = append(app.cli.Commands, &cli.Command{
-		Name:              "view",
-		Usage:             "View test results from history",
-		ArgsUsage:         "[ID|INDEX]",
-		Action:            app.view,
-		SkipFlagParsing:   true,
+		Name:            "view",
+		Usage:           "View test results from history",
+		ArgsUsage:       "[ID|INDEX]",
+		Action:          app.view,
+		SkipFlagParsing: true,
 		Description: `View test results from history.
 
 Arguments:

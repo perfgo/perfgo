@@ -18,12 +18,12 @@ func (a *App) validateTestPath(path string) error {
 	if err != nil {
 		return err
 	}
-	
+
 	// Ensure only one package matches
 	if len(packages) > 1 {
 		return fmt.Errorf("package pattern %q matches multiple packages (%d total), please specify a single package path", path, len(packages))
 	}
-	
+
 	return nil
 }
 

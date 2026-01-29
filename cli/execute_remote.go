@@ -9,11 +9,81 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 
 	"al.essio.dev/pkg/shellescape"
 	"github.com/perfgo/perfgo/cli/perf"
 	"github.com/perfgo/perfgo/cli/ssh"
 )
+
+// runRemoteCommandWithSignalHandling executes an SSH command with proper signal handling.
+// When SIGINT/SIGTERM is received, it sends the signal to the remote process and waits for it to terminate.
+func (a *App) runRemoteCommandWithSignalHandling(sshClient *ssh.Client, remoteCmd string, stdoutWriter, stderrWriter io.Writer) error {
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+
+	// Build SSH command with -tt flag for TTY allocation which properly forwards signals
+	// -tt forces TTY allocation even when stdin is not a terminal
+	// -q suppresses SSH connection messages
+	args := []string{
+		"-o", fmt.Sprintf("ControlPath=%s", sshClient.ControlPath()),
+		"-o", "ControlMaster=auto",
+		"-tt", // Force TTY allocation to enable signal forwarding
+		"-q",  // Quiet mode - suppress connection messages
+		sshClient.Host(),
+		remoteCmd,
+	}
+
+	// Execute the command remotely
+	cmd := exec.Command("ssh", args...)
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start remote command: %w", err)
+	}
+
+	// Create a channel to wait for command completion
+	cmdDone := make(chan error, 1)
+	go func() {
+		cmdDone <- cmd.Wait()
+	}()
+
+	// Wait for either signal or command completion
+	select {
+	case sig := <-sigChan:
+		a.logger.Info().Msg("Interrupt received, forwarding signal to remote process...")
+
+		// Forward the signal to the SSH process
+		// SSH with -t will forward the signal to the remote process
+		if cmd.Process != nil {
+			if err := cmd.Process.Signal(sig); err != nil {
+				a.logger.Warn().Err(err).Msg("Failed to send signal to SSH process")
+			}
+		}
+
+		// Wait for the command to actually finish
+		err := <-cmdDone
+		if err != nil {
+			// Check if it's an exit error (expected after interrupt)
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				a.logger.Debug().
+					Int("exit_code", exitErr.ExitCode()).
+					Msg("Remote process terminated after interrupt")
+			}
+		}
+
+		a.logger.Info().Msg("Remote test execution stopped")
+		return fmt.Errorf("execution interrupted by user")
+
+	case err := <-cmdDone:
+		return err
+	}
+}
 
 func (a *App) executeRemoteTestInDir(sshClient *ssh.Client, remotePath, remoteDir, remoteBaseDir, packagePath string, recordOpts *perf.RecordOptions, args []string, stdout, stderr *string) error {
 	return a.executeRemoteTestInDirWithOptions(sshClient, remotePath, remoteDir, remoteBaseDir, packagePath, recordOpts, args, stdout, stderr)
@@ -45,22 +115,15 @@ func (a *App) executeRemoteTestInDirWithStatOptions(sshClient *ssh.Client, remot
 		Bool("detail", statOpts.Detail).
 		Msg("Wrapping remote test execution with perf stat")
 
-	// Execute the test binary remotely
-	cmd := exec.Command("ssh",
-		"-o", fmt.Sprintf("ControlPath=%s", sshClient.ControlPath()),
-		"-o", "ControlMaster=no",
-		sshClient.Host(),
-		remoteCmd,
-	)
-
 	// Capture stdout and stderr for history
 	var stdoutBuf, stderrBuf bytes.Buffer
 
 	// Create multi-writers to both capture and display output
-	cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
-	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+	stdoutWriter := io.MultiWriter(os.Stdout, &stdoutBuf)
+	stderrWriter := io.MultiWriter(os.Stderr, &stderrBuf)
 
-	if err := cmd.Run(); err != nil {
+	// Execute the test binary remotely with signal handling
+	if err := a.runRemoteCommandWithSignalHandling(sshClient, remoteCmd, stdoutWriter, stderrWriter); err != nil {
 		// Save captured output
 		*stdout = stdoutBuf.String()
 		*stderr = stderrBuf.String()
@@ -140,22 +203,15 @@ func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePat
 		}
 	}
 
-	// Execute the test binary remotely
-	cmd := exec.Command("ssh",
-		"-o", fmt.Sprintf("ControlPath=%s", sshClient.ControlPath()),
-		"-o", "ControlMaster=no",
-		sshClient.Host(),
-		remoteCmd,
-	)
-
 	// Capture stdout and stderr for history
 	var stdoutBuf, stderrBuf bytes.Buffer
 
 	// Create multi-writers to both capture and display output
-	cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
-	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+	stdoutWriter := io.MultiWriter(os.Stdout, &stdoutBuf)
+	stderrWriter := io.MultiWriter(os.Stderr, &stderrBuf)
 
-	if err := cmd.Run(); err != nil {
+	// Execute the test binary remotely with signal handling
+	if err := a.runRemoteCommandWithSignalHandling(sshClient, remoteCmd, stdoutWriter, stderrWriter); err != nil {
 		// Save captured output
 		*stdout = stdoutBuf.String()
 		*stderr = stderrBuf.String()
@@ -220,22 +276,15 @@ func (a *App) executeRemoteTestInDirWithC2COptions(sshClient *ssh.Client, remote
 	}
 	logMsg.Msg("Wrapping remote test execution with perf c2c record")
 
-	// Execute the test binary remotely
-	cmd := exec.Command("ssh",
-		"-o", fmt.Sprintf("ControlPath=%s", sshClient.ControlPath()),
-		"-o", "ControlMaster=no",
-		sshClient.Host(),
-		remoteCmd,
-	)
-
 	// Capture stdout and stderr for history
 	var stdoutBuf, stderrBuf bytes.Buffer
 
 	// Create multi-writers to both capture and display output
-	cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
-	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
+	stdoutWriter := io.MultiWriter(os.Stdout, &stdoutBuf)
+	stderrWriter := io.MultiWriter(os.Stderr, &stderrBuf)
 
-	if err := cmd.Run(); err != nil {
+	// Execute the test binary remotely with signal handling
+	if err := a.runRemoteCommandWithSignalHandling(sshClient, remoteCmd, stdoutWriter, stderrWriter); err != nil {
 		// Save captured output
 		*stdout = stdoutBuf.String()
 		*stderr = stderrBuf.String()

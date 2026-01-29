@@ -135,17 +135,17 @@ func WithTTY(tty bool) RunOption {
 // RunCommand executes a command on the remote host and returns the output.
 func (c *Client) Run(command string, optFuncs ...RunOption) error {
 	args := c.buildSSHArgs()
-	
+
 	opts := &runOptions{}
 	for _, f := range optFuncs {
 		f(opts)
 	}
-	
+
 	// Add TTY flags if requested
 	if opts.tty {
 		args = append(args, "-t", "-t") // -t -t forces TTY allocation even without controlling terminal
 	}
-	
+
 	args = append(args, c.host, command)
 
 	cmd := exec.Command("ssh", args...)
@@ -187,7 +187,7 @@ func (c *Client) buildSSHArgs() []string {
 	if c.controlPath != "" {
 		args = append(args,
 			"-o", fmt.Sprintf("ControlPath=%s", c.controlPath),
-			"-o", "ControlMaster=no",
+			"-o", "ControlMaster=auto",
 		)
 	}
 
