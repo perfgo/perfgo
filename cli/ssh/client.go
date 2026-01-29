@@ -526,15 +526,10 @@ func (c *Client) getControlSocketDir() string {
 // getRemoteCacheDir determines the cache directory on the remote host.
 func (c *Client) getRemoteCacheDir() (string, error) {
 	// Query remote host for XDG_CACHE_HOME or default
-	getCacheDirCmd := `
-if [ -n "$XDG_CACHE_HOME" ]; then
-    echo "$XDG_CACHE_HOME/perfgo"
-elif [ -n "$HOME" ]; then
-    echo "$HOME/.cache/perfgo"
-else
-    echo "/tmp/perfgo"
-fi
-`
+	// Explicitly use /bin/sh to ensure POSIX shell compatibility
+	// (remote host may use fish or other non-POSIX shells by default)
+	getCacheDirCmd := `/bin/sh -c 'if [ -n "$XDG_CACHE_HOME" ]; then echo "$XDG_CACHE_HOME/perfgo"; elif [ -n "$HOME" ]; then echo "$HOME/.cache/perfgo"; else echo "/tmp/perfgo"; fi'`
+
 	cacheDir, _, err := c.RunCommand(getCacheDirCmd)
 	if err != nil {
 		return "", fmt.Errorf("failed to determine remote cache directory: %w", err)
