@@ -6,6 +6,7 @@ package perf
 import (
 	"bufio"
 	"crypto/sha256"
+	"debug/elf"
 	"encoding/base32"
 	"encoding/base64"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"strings"
 
 	"al.essio.dev/pkg/shellescape"
+	"github.com/google/pprof/profile"
 	"github.com/perfgo/perfgo/cli/ssh"
 	"github.com/perfgo/perfgo/perfscript"
 	"github.com/rs/zerolog"
@@ -149,7 +151,8 @@ func binaryArtifactPaths(runDir, originalPath, hash string) (filename, fullPath 
 }
 
 // buildAndWriteProfile parses a perf script output string into a pprof profile,
-// rewrites mapping paths using localBinaries, writes the result to outputPath, and logs a summary.
+// rewrites mapping paths using localBinaries, verifies and corrects symbolization,
+// then writes the result to outputPath and logs a summary.
 func buildAndWriteProfile(logger zerolog.Logger, scriptOutput string, localBinaries map[string]string, outputPath string, binaryCount int, historyID string) error {
 	parser := perfscript.New()
 	prof, err := parser.Parse(strings.NewReader(scriptOutput))
@@ -162,6 +165,9 @@ func buildAndWriteProfile(logger zerolog.Logger, scriptOutput string, localBinar
 			mapping.File = newPath
 		}
 	}
+
+	// Check and correct symbolization before writing so any offset fixes are persisted.
+	checkProfileSymbolization(logger, prof)
 
 	f, err := os.Create(outputPath)
 	if err != nil {
@@ -584,4 +590,118 @@ func copyBinaryFromRemote(logger zerolog.Logger, sshClient *ssh.Client, remotePa
 		Msg("Binary hash verified")
 
 	return nil
+}
+
+// checkProfileSymbolization verifies that each non-kernel mapping can be
+// symbolized correctly. For each mapping it picks one location whose function
+// name is already known in the profile and checks whether the ELF symbol at
+// the computed object address matches that name.
+//
+// If the names match, symbolization is already correct and nothing is changed.
+//
+// If they do not match, the ELF load base is added to the probe address and
+// checked again. If that resolves the correct symbol, mapping.Offset is updated
+// to the load base so the fix is persisted into the written profile, and an
+// info message is logged.
+//
+// All other outcomes (binary inaccessible, stripped, address not found) are
+// logged at debug level only.
+func checkProfileSymbolization(logger zerolog.Logger, prof *profile.Profile) {
+	for _, m := range prof.Mapping {
+		if strings.HasPrefix(m.File, "[") {
+			continue
+		}
+
+		// Find a representative address with a known function name in the profile.
+		var testAddr uint64
+		var expectedName string
+		for _, loc := range prof.Location {
+			if loc.Mapping != nil && loc.Mapping.ID == m.ID && loc.Address != 0 &&
+				len(loc.Line) > 0 && loc.Line[0].Function != nil && loc.Line[0].Function.Name != "" {
+				testAddr = loc.Address
+				expectedName = loc.Line[0].Function.Name
+				break
+			}
+		}
+		if testAddr == 0 {
+			continue
+		}
+
+		// pprof symbolizer computes: objAddr = addr - Start + Offset
+		objAddr := testAddr - m.Start + m.Offset
+
+		f, err := elf.Open(m.File)
+		if err != nil {
+			logger.Debug().
+				Str("binary", filepath.Base(m.File)).
+				Msg("mapping: binary not accessible, symbolization cannot be verified")
+			continue
+		}
+
+		syms, symErr := f.Symbols()
+		if symErr != nil {
+			syms, symErr = f.DynamicSymbols()
+		}
+
+		// Extract load base while the file is open, to avoid reopening it.
+		var loadBase uint64
+		if f.Type == elf.ET_EXEC {
+			for _, prog := range f.Progs {
+				if prog.Type == elf.PT_LOAD {
+					loadBase = prog.Vaddr
+					break
+				}
+			}
+		}
+		f.Close()
+
+		if symErr != nil {
+			logger.Debug().
+				Str("binary", filepath.Base(m.File)).
+				Msg("mapping: no symbol table, symbolization cannot be verified")
+			continue
+		}
+
+		// If the symbol at objAddr matches the expected name, symbolization is correct.
+		if sym := elfFindSymbol(syms, objAddr); sym == expectedName {
+			logger.Debug().
+				Str("binary", filepath.Base(m.File)).
+				Str("symbol", sym).
+				Str("addr", fmt.Sprintf("0x%x", objAddr)).
+				Msg("mapping: symbolization OK")
+			continue
+		}
+
+		// Names did not match — try adding the ELF load base (fixes ET_EXEC binaries
+		// whose mapping.Offset was not set during profile creation).
+		if loadBase != 0 && loadBase != m.Offset {
+			probeAddr := objAddr + loadBase
+			if sym := elfFindSymbol(syms, probeAddr); sym == expectedName {
+				m.Offset = loadBase
+				logger.Info().
+					Str("binary", filepath.Base(m.File)).
+					Str("symbol", sym).
+					Str("load_base", fmt.Sprintf("0x%x", loadBase)).
+					Msg("mapping: corrected offset to ELF load base for symbolization")
+				continue
+			}
+		}
+
+		logger.Debug().
+			Str("binary", filepath.Base(m.File)).
+			Str("expected", expectedName).
+			Str("addr", fmt.Sprintf("0x%x", objAddr)).
+			Msg("mapping: cannot verify symbolization, address not found in symbol table")
+	}
+}
+
+// elfFindSymbol returns the name of the function symbol whose range contains
+// addr, or "" if none is found.
+func elfFindSymbol(syms []elf.Symbol, addr uint64) string {
+	for _, sym := range syms {
+		if sym.Value != 0 && sym.Size != 0 && sym.Value <= addr && addr < sym.Value+sym.Size {
+			return sym.Name
+		}
+	}
+	return ""
 }
