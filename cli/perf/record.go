@@ -103,17 +103,12 @@ func ProfileCountFlag() cli.Flag {
 	}
 }
 
-// ConvertPerfToPprof converts a local perf.data file to pprof format.
-// The perf script output is written to a temporary file that is deleted after processing.
-// Returns a list of binaries that were copied for artifact registration.
-// Binaries are stored as <base32-sha256>.<basename>.binary in runDir.
-func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath string, runDir string, historyID string) ([]BinaryArtifact, error) {
-	logger.Info().Str("input", perfDataPath).Str("output", outputPath).Msg("Processing performance data locally")
-
-	// Create temporary file for perf script output
+// runPerfScriptToString runs perf script by calling run with a temporary file,
+// then returns the full output as a string. The temporary file is cleaned up automatically.
+func runPerfScriptToString(logger zerolog.Logger, run func(w *os.File) error) (string, error) {
 	tempFile, err := os.CreateTemp("", "perf-script-*.txt")
 	if err != nil {
-		return nil, fmt.Errorf("failed to create temporary file: %w", err)
+		return "", fmt.Errorf("failed to create temporary file: %w", err)
 	}
 	tempPath := tempFile.Name()
 	defer func() {
@@ -122,40 +117,104 @@ func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath s
 		logger.Debug().Str("temp_file", tempPath).Msg("Cleaned up temporary perf script file")
 	}()
 
-	// Run perf script locally and write to temp file
-	cmd := exec.Command("perf", "script", "-i", perfDataPath)
-	cmd.Stdout = tempFile
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to run perf script: %w", err)
+	if err := run(tempFile); err != nil {
+		return "", err
 	}
 
-	// Get file size for logging
 	fileInfo, _ := tempFile.Stat()
 	logger.Info().
 		Int64("size_bytes", fileInfo.Size()).
 		Str("temp_file", tempPath).
 		Msg("Performance script output written to temporary file")
 
-	// Seek back to beginning for reading
 	if _, err := tempFile.Seek(0, 0); err != nil {
-		return nil, fmt.Errorf("failed to seek temporary file: %w", err)
+		return "", fmt.Errorf("failed to seek temporary file: %w", err)
 	}
 
-	// Read the entire file into memory for extractBinaryPaths
 	scriptBytes, err := io.ReadAll(tempFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read temporary file: %w", err)
+		return "", fmt.Errorf("failed to read temporary file: %w", err)
 	}
-	scriptOutput := string(scriptBytes)
 
-	// Extract unique binary paths from perf script output
+	return string(scriptBytes), nil
+}
+
+// binaryArtifactPaths returns the artifact filename and full local path for a binary.
+// Binaries are named <hash>.<original-basename>.binary inside runDir.
+func binaryArtifactPaths(runDir, originalPath, hash string) (filename, fullPath string) {
+	basename := filepath.Base(originalPath)
+	filename = hash + "." + basename + ".binary"
+	fullPath = filepath.Join(runDir, filename)
+	return
+}
+
+// buildAndWriteProfile parses a perf script output string into a pprof profile,
+// rewrites mapping paths using localBinaries, writes the result to outputPath, and logs a summary.
+func buildAndWriteProfile(logger zerolog.Logger, scriptOutput string, localBinaries map[string]string, outputPath string, binaryCount int, historyID string) error {
+	parser := perfscript.New()
+	prof, err := parser.Parse(strings.NewReader(scriptOutput))
+	if err != nil {
+		return fmt.Errorf("failed to parse perf script: %w", err)
+	}
+
+	for _, mapping := range prof.Mapping {
+		if newPath, ok := localBinaries[mapping.File]; ok {
+			mapping.File = newPath
+		}
+	}
+
+	f, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create profile file: %w", err)
+	}
+	defer f.Close()
+
+	if err := prof.Write(f); err != nil {
+		return fmt.Errorf("failed to write profile: %w", err)
+	}
+
+	logger.Info().
+		Str("profile", outputPath).
+		Int("binaries", binaryCount).
+		Int("samples", len(prof.Sample)).
+		Int("functions", len(prof.Function)).
+		Int("locations", len(prof.Location)).
+		Msg("Performance profile created")
+
+	shortID := historyID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	logger.Info().Msgf("View profile with: perfgo view %s", shortID)
+
+	return nil
+}
+
+// ConvertPerfToPprof converts a local perf.data file to pprof format.
+// The perf script output is written to a temporary file that is deleted after processing.
+// Returns a list of binaries that were copied for artifact registration.
+// Binaries are stored as <base32-sha256>.<basename>.binary in runDir.
+func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath string, runDir string, historyID string) ([]BinaryArtifact, error) {
+	logger.Info().Str("input", perfDataPath).Str("output", outputPath).Msg("Processing performance data locally")
+
+	scriptOutput, err := runPerfScriptToString(logger, func(w *os.File) error {
+		cmd := exec.Command("perf", "script", "-i", perfDataPath)
+		cmd.Stdout = w
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to run perf script: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	binaryPaths := extractBinaryPaths(scriptOutput)
 	logger.Info().
 		Int("count", len(binaryPaths)).
 		Msg("Found binaries referenced in profile")
 
-	// Copy and hash local binaries
-	localBinaries := make(map[string]string) // original path -> new path
+	localBinaries := make(map[string]string)
 	var binaryArtifacts []BinaryArtifact
 	if len(binaryPaths) > 0 {
 		logger.Info().Msg("Processing local binaries")
@@ -166,7 +225,6 @@ func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath s
 				continue
 			}
 
-			// Check if binary exists
 			if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
 				logger.Debug().
 					Str("path", binaryPath).
@@ -174,7 +232,6 @@ func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath s
 				continue
 			}
 
-			// Hash the local binary
 			hash, size, err := hashLocalBinary(binaryPath)
 			if err != nil {
 				logger.Warn().
@@ -184,12 +241,7 @@ func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath s
 				continue
 			}
 
-			// Construct filename with hash and original basename
-			basename := filepath.Base(binaryPath)
-			binaryFilename := hash + "." + basename + ".binary"
-			destPath := filepath.Join(runDir, binaryFilename)
-
-			// Copy binary to destination
+			binaryFilename, destPath := binaryArtifactPaths(runDir, binaryPath, hash)
 			if err := copyLocalBinary(binaryPath, destPath); err != nil {
 				logger.Warn().
 					Err(err).
@@ -200,8 +252,6 @@ func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath s
 			}
 
 			localBinaries[binaryPath] = destPath
-
-			// Collect artifact information
 			binaryArtifacts = append(binaryArtifacts, BinaryArtifact{
 				RemotePath: binaryPath,
 				LocalPath:  binaryFilename,
@@ -221,44 +271,9 @@ func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath s
 			Msg("Binaries processed successfully")
 	}
 
-	// Parse and create the profile
-	parser := perfscript.New()
-	prof, err := parser.Parse(strings.NewReader(scriptOutput))
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse perf script: %w", err)
+	if err := buildAndWriteProfile(logger, scriptOutput, localBinaries, outputPath, len(binaryArtifacts), historyID); err != nil {
+		return nil, err
 	}
-
-	// Update binary paths in the profile to point to local copies
-	for _, mapping := range prof.Mapping {
-		if newPath, ok := localBinaries[mapping.File]; ok {
-			mapping.File = newPath
-		}
-	}
-
-	// Write profile to file
-	f, err := os.Create(outputPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create profile file: %w", err)
-	}
-	defer f.Close()
-
-	if err := prof.Write(f); err != nil {
-		return nil, fmt.Errorf("failed to write profile: %w", err)
-	}
-
-	logger.Info().
-		Str("profile", outputPath).
-		Int("binaries", len(binaryArtifacts)).
-		Int("samples", len(prof.Sample)).
-		Int("functions", len(prof.Function)).
-		Int("locations", len(prof.Location)).
-		Msg("Performance profile created")
-
-	shortID := historyID
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
-	}
-	logger.Info().Msgf("View profile with: perfgo view %s", shortID)
 
 	return binaryArtifacts, nil
 }
@@ -302,62 +317,39 @@ type BinaryArtifact struct {
 
 // ProcessPerfData processes perf data from a remote host and creates a pprof profile.
 // It resolves binary paths through /proc/<pid>/root for containerized processes.
-// The perf script output is written to a temporary file that is deleted after processing.
+// extraBinaries maps profile paths (as they appear in the perf output) to local file paths
+// for binaries that are already available locally (e.g. a test binary built locally and
+// deployed to the remote host). These are archived before the profile is written, so no
+// later path-rewriting pass is needed.
 // Returns a list of binaries that were copied for artifact registration.
-// Binaries are stored as <base32-sha256>.binary in runDir.
-func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir string, outputPath string, runDir string, pids []string, historyID string) ([]BinaryArtifact, error) {
+// Binaries are stored as <base32-sha256>.<basename>.binary in runDir.
+func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir string, outputPath string, runDir string, pids []string, extraBinaries map[string]string, historyID string) ([]BinaryArtifact, error) {
 	remotePerfData := fmt.Sprintf("%s/perf.data", remoteBaseDir)
 
 	logger.Info().
 		Str("remote", remotePerfData).
 		Msg("Processing performance data on remote host")
 
-	// Create temporary file for perf script output
-	tempFile, err := os.CreateTemp("", "perf-script-*.txt")
+	scriptOutput, err := runPerfScriptToString(logger, func(w *os.File) error {
+		perfScriptCmd := fmt.Sprintf("perf script -i %s", remotePerfData)
+		if err := sshClient.Run(perfScriptCmd, ssh.WithStdOut(w)); err != nil {
+			return fmt.Errorf("failed to run perf script remotely: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create temporary file: %w", err)
-	}
-	tempPath := tempFile.Name()
-	defer func() {
-		tempFile.Close()
-		os.Remove(tempPath)
-		logger.Debug().Str("temp_file", tempPath).Msg("Cleaned up temporary perf script file")
-	}()
-
-	// Run perf script remotely and stream output to temp file
-	perfScriptCmd := fmt.Sprintf("perf script -i %s", remotePerfData)
-	if err := sshClient.Run(perfScriptCmd, ssh.WithStdOut(tempFile)); err != nil {
-		return nil, fmt.Errorf("failed to run perf script remotely: %w", err)
+		return nil, err
 	}
 
-	// Get file size for logging
-	fileInfo, _ := tempFile.Stat()
-	logger.Info().
-		Int64("size_bytes", fileInfo.Size()).
-		Str("temp_file", tempPath).
-		Msg("Performance script output written to temporary file")
-
-	// Seek back to beginning for reading
-	if _, err := tempFile.Seek(0, 0); err != nil {
-		return nil, fmt.Errorf("failed to seek temporary file: %w", err)
-	}
-
-	// Read the entire file into memory for extractBinaryPaths
-	scriptBytes, err := io.ReadAll(tempFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read temporary file: %w", err)
-	}
-	scriptOutput := string(scriptBytes)
-
-	// Extract unique binary paths from perf script output
 	binaryPaths := extractBinaryPaths(scriptOutput)
 	logger.Info().
 		Int("count", len(binaryPaths)).
 		Msg("Found binaries referenced in profile")
 
-	// Copy binaries from remote host
-	localBinaries := make(map[string]string) // remote path -> local path
+	localBinaries := make(map[string]string)
 	var binaryArtifacts []BinaryArtifact
+
+	// Copy binaries from remote host via /proc/<pid>/root.
 	if len(binaryPaths) > 0 && len(pids) > 0 {
 		logger.Info().Msg("Copying binaries from remote host")
 
@@ -367,13 +359,11 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 				continue
 			}
 
-			// Try to find binary through /proc/<pid>/root for each PID
+			// Try to find binary through /proc/<pid>/root for each PID.
 			var foundProcPath string
 			var foundPID string
 			for _, pid := range pids {
 				procPath := fmt.Sprintf("/proc/%s/root%s", pid, remotePath)
-
-				// Check if binary exists via /proc/<pid>/root
 				checkCmd := fmt.Sprintf("test -f %s && echo exists", procPath)
 				output, _, err := sshClient.RunCommand(checkCmd)
 				if err == nil && strings.TrimSpace(output) == "exists" {
@@ -390,7 +380,6 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 				continue
 			}
 
-			// Get hash from remote system first
 			hash, size, err := getRemoteBinaryHash(logger, sshClient, foundProcPath)
 			if err != nil {
 				logger.Warn().
@@ -401,12 +390,7 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 				continue
 			}
 
-			// Construct final filename with hash and original basename
-			basename := filepath.Base(remotePath)
-			binaryFilename := hash + "." + basename + ".binary"
-			localPath := filepath.Join(runDir, binaryFilename)
-
-			// Copy binary directly to final location and verify hash
+			binaryFilename, localPath := binaryArtifactPaths(runDir, remotePath, hash)
 			if err := copyBinaryFromRemote(logger, sshClient, foundProcPath, localPath, hash); err != nil {
 				logger.Warn().
 					Err(err).
@@ -417,8 +401,6 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 			}
 
 			localBinaries[remotePath] = localPath
-
-			// Collect artifact information
 			binaryArtifacts = append(binaryArtifacts, BinaryArtifact{
 				RemotePath: remotePath,
 				LocalPath:  binaryFilename,
@@ -440,45 +422,56 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 			Msg("Binaries copied successfully")
 	}
 
-	// Parse and create the profile
-	parser := perfscript.New()
-	prof, err := parser.Parse(strings.NewReader(scriptOutput))
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse perf script: %w", err)
-	}
-
-	// Update binary paths in the profile to point to local copies
-	for _, mapping := range prof.Mapping {
-		if localPath, ok := localBinaries[mapping.File]; ok {
-			mapping.File = localPath
+	// Archive locally-available binaries (e.g. test binary built locally and deployed remotely).
+	for profilePath, localPath := range extraBinaries {
+		if strings.HasPrefix(profilePath, "[") {
+			continue
 		}
+
+		if _, err := os.Stat(localPath); os.IsNotExist(err) {
+			logger.Debug().
+				Str("path", localPath).
+				Msg("Extra binary not found locally, skipping")
+			continue
+		}
+
+		hash, size, err := hashLocalBinary(localPath)
+		if err != nil {
+			logger.Warn().
+				Err(err).
+				Str("path", localPath).
+				Msg("Failed to hash extra binary")
+			continue
+		}
+
+		binaryFilename, destPath := binaryArtifactPaths(runDir, profilePath, hash)
+		if err := copyLocalBinary(localPath, destPath); err != nil {
+			logger.Warn().
+				Err(err).
+				Str("src", localPath).
+				Str("dest", destPath).
+				Msg("Failed to copy extra binary")
+			continue
+		}
+
+		localBinaries[profilePath] = destPath
+		binaryArtifacts = append(binaryArtifacts, BinaryArtifact{
+			RemotePath: profilePath,
+			LocalPath:  binaryFilename,
+			Size:       size,
+			Hash:       hash,
+		})
+
+		logger.Debug().
+			Str("profile_path", profilePath).
+			Str("local", localPath).
+			Str("dest", binaryFilename).
+			Msg("Archived extra binary")
 	}
 
-	// Write profile to file
-	profileFile := outputPath
-	f, err := os.Create(profileFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create profile file: %w", err)
+	if err := buildAndWriteProfile(logger, scriptOutput, localBinaries, outputPath, len(binaryArtifacts), historyID); err != nil {
+		return nil, err
 	}
-	defer f.Close()
-
-	if err := prof.Write(f); err != nil {
-		return nil, fmt.Errorf("failed to write profile: %w", err)
-	}
-
-	logger.Info().
-		Str("profile", profileFile).
-		Int("binaries", len(binaryArtifacts)).
-		Int("samples", len(prof.Sample)).
-		Int("functions", len(prof.Function)).
-		Int("locations", len(prof.Location)).
-		Msg("Performance profile created")
-
-	shortID := historyID
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
-	}
-	logger.Info().Msgf("View profile with: perfgo view %s", shortID)
 
 	return binaryArtifacts, nil
 }

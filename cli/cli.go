@@ -595,7 +595,7 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 
 			// Copy back and process perf.data
 			profilePath := filepath.Join(runDir, "perf.pb.gz")
-			binaryArtifacts, err := perf.ProcessPerfData(a.logger, sshClient, remoteBaseDir, profilePath, runDir, nil, history.ID)
+			binaryArtifacts, err := perf.ProcessPerfData(a.logger, sshClient, remoteBaseDir, profilePath, runDir, nil, map[string]string{remotePath: testBinary}, history.ID)
 			if err != nil {
 				a.logger.Error().Err(err).Msg("Failed to process performance data")
 				finalErr = err
