@@ -630,7 +630,7 @@ func (a *App) executePerfRecord(client *ssh.Client, pids []string, recordOpts *p
 	// Process perf.data and convert to pprof
 	remoteBaseDir := "/tmp"
 	profilePath := filepath.Join(runDir, "perf.pb.gz")
-	binaryArtifacts, err := perf.ProcessPerfData(a.logger, client, remoteBaseDir, profilePath, runDir, pids, history.ID)
+	binaryArtifacts, err := perf.ProcessPerfData(a.logger, client, remoteBaseDir, profilePath, runDir, pids, nil, history.ID)
 	if err != nil {
 		return fmt.Errorf("failed to process performance data: %w", err)
 	}
