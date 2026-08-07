@@ -69,8 +69,8 @@ func (a *App) executeLocalTestWithOptions(binaryPath string, recordOpts *perf.Re
 		Str("binary", binaryPath).
 		Strs("args", args)
 
-	if recordOpts != nil && recordOpts.Event != "" {
-		logMsg.Str("perfEvent", recordOpts.Event)
+	if recordOpts != nil && len(recordOpts.Events) > 0 {
+		logMsg.Strs("perfEvents", recordOpts.Events)
 		if recordOpts.Count > 0 {
 			logMsg.Int("perfCount", recordOpts.Count)
 		}
@@ -89,8 +89,8 @@ func (a *App) executeLocalTestWithOptions(binaryPath string, recordOpts *perf.Re
 		cmd = exec.Command("perf", perfArgs...)
 
 		logEvent := a.logger.Info()
-		if recordOpts.Event != "" {
-			logEvent.Str("event", recordOpts.Event)
+		if len(recordOpts.Events) > 0 {
+			logEvent.Strs("events", recordOpts.Events)
 			if recordOpts.Count > 0 {
 				logEvent.Int("count", recordOpts.Count)
 			}

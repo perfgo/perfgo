@@ -143,7 +143,11 @@ func (a *App) displayHistoryEntry(entry *history.Entry, pprofArgs []string) erro
 	}
 	if h.Perf != nil {
 		if h.Perf.Record != nil {
-			fmt.Printf("Perf Record: event=%s", h.Perf.Record.Event)
+			events := h.Perf.Record.Events
+			if len(events) == 0 && h.Perf.Record.Event != "" {
+				events = []string{h.Perf.Record.Event}
+			}
+			fmt.Printf("Perf Record: events=%v", events)
 			if h.Perf.Record.Count > 0 {
 				fmt.Printf(", count=%d", h.Perf.Record.Count)
 			}

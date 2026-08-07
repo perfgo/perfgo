@@ -30,7 +30,7 @@ const progressLogInterval = 10 * time.Second
 
 // RecordOptions contains options for perf record command.
 type RecordOptions struct {
-	Event      string   // Event to record
+	Events     []string // Events to record
 	Count      int      // Event period to sample (e.g., -c 1000000)
 	PIDs       []string // Process IDs to attach to
 	Duration   int      // Duration in seconds (used with sleep)
@@ -43,11 +43,13 @@ type RecordOptions struct {
 func BuildRecordArgs(opts RecordOptions) []string {
 	args := []string{"record", "-g", "--call-graph", "fp"}
 
-	// Add event
-	if opts.Event != "" {
-		args = append(args, "-e", opts.Event)
+	// Add events
+	if len(opts.Events) > 0 {
+		for _, event := range opts.Events {
+			args = append(args, "-e", strings.TrimSpace(event))
+		}
 
-		// Add count (event period) - only if event is specified
+		// Add count (event period) - only if events are specified
 		if opts.Count > 0 {
 			args = append(args, "-c", fmt.Sprintf("%d", opts.Count))
 		}
@@ -91,12 +93,12 @@ func BuildRecordCommand(opts RecordOptions) string {
 	return strings.Join(parts, " ")
 }
 
-// ProfileEventFlag returns the event flag for perf record (single event).
+// ProfileEventFlag returns the event flag for perf record.
 func ProfileEventFlag() cli.Flag {
-	return &cli.StringFlag{
+	return &cli.StringSliceFlag{
 		Name:    "event",
 		Aliases: []string{"e"},
-		Usage:   "Event to record",
+		Usage:   "Event to record (can be specified multiple times)",
 	}
 }
 

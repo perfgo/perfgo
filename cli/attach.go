@@ -56,20 +56,19 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 	perfImage := ctx.String("perf-image")
 	duration := ctx.Int("duration")
 
-	var perfEvent string
+	var profileEvents []string
 	var perfCount int
-	var perfEvents []string
+	var statEvents []string
 	var perfDetail bool
 	var c2cEvent string
 	var c2cCount int
 	var c2cReportMode string
 	var c2cShowAll bool
 	if mode == "profile" {
-		perfEvent = ctx.String("event")
+		profileEvents = ctx.StringSlice("event")
 		perfCount = ctx.Int("count")
 	} else if mode == "stat" {
-		perfEvents = ctx.StringSlice("event")
-		perfEvent = strings.Join(perfEvents, ",")
+		statEvents = ctx.StringSlice("event")
 		perfDetail = ctx.Bool("detail")
 	} else if mode == "c2c" {
 		// Use default values for c2c
@@ -348,20 +347,20 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 		// Store perf options in history
 		history.Perf = &model.Perf{
 			Stat: &model.PerfStat{
-				Events:   perfEvents,
+				Events:   statEvents,
 				PIDs:     allPIDs,
 				Duration: duration,
 				Detail:   perfDetail,
 			},
 		}
 
-		if err := a.executePerfStat(sshClient, allPIDs, perfEvents, perfDetail, duration, &stdoutContent, &stderrContent); err != nil {
+		if err := a.executePerfStat(sshClient, allPIDs, statEvents, perfDetail, duration, &stdoutContent, &stderrContent); err != nil {
 			finalErr = fmt.Errorf("failed to execute perf stat: %w", err)
 			return finalErr
 		}
 	} else if mode == "profile" {
 		recordOpts := &perf.RecordOptions{
-			Event:    perfEvent,
+			Events:   profileEvents,
 			Count:    perfCount,
 			Duration: duration,
 		}
@@ -369,7 +368,7 @@ func (a *App) runAttach(ctx *cli.Context, mode string) error {
 		// Store perf options in history
 		history.Perf = &model.Perf{
 			Record: &model.PerfRecord{
-				Event:    perfEvent,
+				Events:   profileEvents,
 				Count:    perfCount,
 				PIDs:     allPIDs,
 				Duration: duration,
@@ -600,8 +599,8 @@ func (a *App) executePerfRecord(client *ssh.Client, pids []string, recordOpts *p
 	logEvent := a.logger.Info().
 		Strs("pids", pids).
 		Int("duration", recordOpts.Duration)
-	if recordOpts.Event != "" {
-		logEvent.Str("event", recordOpts.Event)
+	if len(recordOpts.Events) > 0 {
+		logEvent.Strs("events", recordOpts.Events)
 		if recordOpts.Count > 0 {
 			logEvent.Int("count", recordOpts.Count)
 		}

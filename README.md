@@ -28,6 +28,9 @@ perfgo test stat -- ./examples/false-sharing -bench=. -benchmem -benchtime=10000
 # Local execution - generate profile
 perfgo test profile -e cache-loads -- ./examples/false-sharing -bench=. -benchmem -benchtime=10000000x -run=^$
 
+# Local execution - profile multiple events
+perfgo test profile -e cycles -e instructions -- ./examples/false-sharing -bench=. -run=^$
+
 # Remote execution - run on Linux server over SSH
 perfgo test stat --remote-host user@remote.example.com -- ./package -bench=.
 
@@ -200,4 +203,3 @@ This project was developed with significant assistance from AI agents. If you no
 - [Bryan Boreham's talk CPU hardware counters](https://www.youtube.com/watch?v=ipoXGP3c6Uk)
 - [Denis Bakhvalov's PMU counters and profiling basics](https://easyperf.net/blog/2018/06/01/PMU-counters-and-profiling-basics)
 - [Sergey Podgorny's CPU cache basics](https://dev.to/larapulse/cpu-cache-basics-57ej)
-
