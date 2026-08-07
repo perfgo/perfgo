@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"al.essio.dev/pkg/shellescape"
 	"github.com/rs/zerolog"
 )
 
@@ -179,9 +180,19 @@ func (c *Client) RunCommand(command string, optFuncs ...RunOption) (string, stri
 	return stdoutBuf.String(), stderrBuf.String(), nil
 }
 
+// CopyFromRemote streams a remote file into dst over the existing SSH connection.
+func (c *Client) CopyFromRemote(remotePath string, dst io.Writer) error {
+	var stderr bytes.Buffer
+	command := fmt.Sprintf("cat -- %s", shellescape.Quote(remotePath))
+	if err := c.Run(command, WithStdOut(dst), WithStdErr(&stderr)); err != nil {
+		return fmt.Errorf("failed to stream remote file: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
 // buildSSHArgs constructs the SSH arguments with all configured options.
 func (c *Client) buildSSHArgs() []string {
-	args := []string{}
+	args := compressionArgs()
 
 	// Add control path options if using multiplexing
 	if c.controlPath != "" {
@@ -212,6 +223,10 @@ func (c *Client) buildSSHArgs() []string {
 	}
 
 	return args
+}
+
+func compressionArgs() []string {
+	return []string{"-C"}
 }
 
 // DetectSystem detects the OS and architecture of the remote system.
@@ -451,14 +466,14 @@ func (c *Client) setupMultiplexing() (string, error) {
 		Msg("Setting up SSH multiplexing")
 
 	// Establish the master connection
-	args := []string{
+	args := append(compressionArgs(),
 		"-o", "ControlMaster=auto",
 		"-o", fmt.Sprintf("ControlPath=%s", controlPath),
 		"-o", "ControlPersist=30s",
 		"-o", "ConnectTimeout=10",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
-	}
+	)
 
 	// Add identity file if specified
 	if c.identityFile != "" {
