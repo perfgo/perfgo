@@ -51,6 +51,9 @@ perfgo attach cache-to-cache --pod my-app-pod -n production --duration 15
 
 # Open an interactive shell for manual perf commands
 perfgo attach shell --pod my-app-pod --namespace production
+
+# Inside the shell, target every resolved pod PID
+perf stat $PERF_PID_ARGS
 ```
 
 ## Collection Modes

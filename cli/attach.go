@@ -718,10 +718,19 @@ func (a *App) executeShell(client *ssh.Client, pids []string) error {
 		Msg("Attaching a shell with perf")
 
 	return client.Run(
-		"/bin/bash",
+		buildAttachShellCommand(pids),
 		ssh.WithStdIn(os.Stdin),
 		ssh.WithStdOut(os.Stdout),
 		ssh.WithStdErr(os.Stderr),
 		ssh.WithTTY(true),
 	)
+}
+
+func buildAttachShellCommand(pids []string) string {
+	pidArgs := make([]string, 0, len(pids)*2)
+	for _, pid := range pids {
+		pidArgs = append(pidArgs, "-p", pid)
+	}
+
+	return fmt.Sprintf("PERF_PID_ARGS=%s /bin/bash", shellescape.Quote(strings.Join(pidArgs, " ")))
 }
