@@ -18,6 +18,7 @@ type Parser struct {
 	functions map[string]*profile.Function
 	locations map[string]*profile.Location
 	mappings  map[string]*profile.Mapping
+	samples   map[string]*profile.Sample
 	nextID    uint64
 }
 
@@ -27,6 +28,7 @@ func New() *Parser {
 		functions: make(map[string]*profile.Function),
 		locations: make(map[string]*profile.Location),
 		mappings:  make(map[string]*profile.Mapping),
+		samples:   make(map[string]*profile.Sample),
 		nextID:    1,
 	}
 }
@@ -234,13 +236,11 @@ func (p *Parser) addSample(stack []*profile.Location, eventType string, count in
 		}
 	}
 
-	// Check if a sample with this exact stack already exists
-	for _, existingSample := range p.profile.Sample {
-		if stacksEqual(existingSample.Location, stack) {
-			// Merge with existing sample
-			existingSample.Value[sampleIdx] += count
-			return
-		}
+	// Merge identical stacks without scanning every sample accumulated so far.
+	stackKey := sampleStackKey(stack)
+	if existingSample, ok := p.samples[stackKey]; ok {
+		existingSample.Value[sampleIdx] += count
+		return
 	}
 
 	// Create new sample
@@ -251,17 +251,14 @@ func (p *Parser) addSample(stack []*profile.Location, eventType string, count in
 	sample.Value[sampleIdx] = count
 
 	p.profile.Sample = append(p.profile.Sample, sample)
+	p.samples[stackKey] = sample
 }
 
-// stacksEqual returns true if two stacks have the same location IDs
-func stacksEqual(a, b []*profile.Location) bool {
-	if len(a) != len(b) {
-		return false
+func sampleStackKey(stack []*profile.Location) string {
+	var key strings.Builder
+	for _, location := range stack {
+		key.WriteString(strconv.FormatUint(location.ID, 10))
+		key.WriteByte(',')
 	}
-	for i := range a {
-		if a[i].ID != b[i].ID {
-			return false
-		}
-	}
-	return true
+	return key.String()
 }
