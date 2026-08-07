@@ -5,16 +5,18 @@ package perf
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"debug/elf"
 	"encoding/base32"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"al.essio.dev/pkg/shellescape"
 	"github.com/google/pprof/profile"
@@ -23,6 +25,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/urfave/cli/v2"
 )
+
+const progressLogInterval = 10 * time.Second
 
 // RecordOptions contains options for perf record command.
 type RecordOptions struct {
@@ -105,40 +109,44 @@ func ProfileCountFlag() cli.Flag {
 	}
 }
 
-// runPerfScriptToString runs perf script by calling run with a temporary file,
-// then returns the full output as a string. The temporary file is cleaned up automatically.
-func runPerfScriptToString(logger zerolog.Logger, run func(w *os.File) error) (string, error) {
+// runPerfScriptToFile runs perf script into a temporary file and rewinds it for reading.
+func runPerfScriptToFile(logger zerolog.Logger, run func(w *os.File) error) (*os.File, error) {
 	tempFile, err := os.CreateTemp("", "perf-script-*.txt")
 	if err != nil {
-		return "", fmt.Errorf("failed to create temporary file: %w", err)
+		return nil, fmt.Errorf("failed to create temporary file: %w", err)
 	}
-	tempPath := tempFile.Name()
-	defer func() {
-		tempFile.Close()
-		os.Remove(tempPath)
-		logger.Debug().Str("temp_file", tempPath).Msg("Cleaned up temporary perf script file")
-	}()
 
 	if err := run(tempFile); err != nil {
-		return "", err
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+		return nil, err
 	}
 
-	fileInfo, _ := tempFile.Stat()
+	fileInfo, err := tempFile.Stat()
+	if err != nil {
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+		return nil, fmt.Errorf("failed to stat perf script output: %w", err)
+	}
 	logger.Info().
 		Int64("size_bytes", fileInfo.Size()).
-		Str("temp_file", tempPath).
+		Str("temp_file", tempFile.Name()).
 		Msg("Performance script output written to temporary file")
 
 	if _, err := tempFile.Seek(0, 0); err != nil {
-		return "", fmt.Errorf("failed to seek temporary file: %w", err)
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+		return nil, fmt.Errorf("failed to seek temporary file: %w", err)
 	}
 
-	scriptBytes, err := io.ReadAll(tempFile)
-	if err != nil {
-		return "", fmt.Errorf("failed to read temporary file: %w", err)
-	}
+	return tempFile, nil
+}
 
-	return string(scriptBytes), nil
+func cleanupPerfScriptFile(logger zerolog.Logger, file *os.File) {
+	path := file.Name()
+	file.Close()
+	os.Remove(path)
+	logger.Debug().Str("temp_file", path).Msg("Cleaned up temporary perf script file")
 }
 
 // binaryArtifactPaths returns the artifact filename and full local path for a binary.
@@ -150,12 +158,12 @@ func binaryArtifactPaths(runDir, originalPath, hash string) (filename, fullPath 
 	return
 }
 
-// buildAndWriteProfile parses a perf script output string into a pprof profile,
+// buildAndWriteProfile parses perf script output into a pprof profile,
 // rewrites mapping paths using localBinaries, verifies and corrects symbolization,
 // then writes the result to outputPath and logs a summary.
-func buildAndWriteProfile(logger zerolog.Logger, scriptOutput string, localBinaries map[string]string, outputPath string, binaryCount int, historyID string) error {
+func buildAndWriteProfile(logger zerolog.Logger, scriptOutput io.Reader, localBinaries map[string]string, outputPath string, binaryCount int, historyID string) error {
 	parser := perfscript.New()
-	prof, err := parser.Parse(strings.NewReader(scriptOutput))
+	prof, err := parser.Parse(scriptOutput)
 	if err != nil {
 		return fmt.Errorf("failed to parse perf script: %w", err)
 	}
@@ -203,19 +211,25 @@ func buildAndWriteProfile(logger zerolog.Logger, scriptOutput string, localBinar
 func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath string, runDir string, historyID string) ([]BinaryArtifact, error) {
 	logger.Info().Str("input", perfDataPath).Str("output", outputPath).Msg("Processing performance data locally")
 
-	scriptOutput, err := runPerfScriptToString(logger, func(w *os.File) error {
+	scriptFile, err := runPerfScriptToFile(logger, func(w *os.File) error {
 		cmd := exec.Command("perf", "script", "-i", perfDataPath)
+		var stderr bytes.Buffer
 		cmd.Stdout = w
+		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to run perf script: %w", err)
+			return fmt.Errorf("failed to run perf script: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	defer cleanupPerfScriptFile(logger, scriptFile)
 
-	binaryPaths := extractBinaryPaths(scriptOutput)
+	binaryPaths, err := extractBinaryPaths(scriptFile)
+	if err != nil {
+		return nil, err
+	}
 	logger.Info().
 		Int("count", len(binaryPaths)).
 		Msg("Found binaries referenced in profile")
@@ -277,7 +291,10 @@ func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath s
 			Msg("Binaries processed successfully")
 	}
 
-	if err := buildAndWriteProfile(logger, scriptOutput, localBinaries, outputPath, len(binaryArtifacts), historyID); err != nil {
+	if _, err := scriptFile.Seek(0, 0); err != nil {
+		return nil, fmt.Errorf("failed to rewind perf script output: %w", err)
+	}
+	if err := buildAndWriteProfile(logger, scriptFile, localBinaries, outputPath, len(binaryArtifacts), historyID); err != nil {
 		return nil, err
 	}
 
@@ -287,27 +304,41 @@ func ConvertPerfToPprof(logger zerolog.Logger, perfDataPath string, outputPath s
 // hashLocalBinary calculates the SHA256 hash of a local binary file.
 // Returns the hash as base32-encoded lowercase string and the file size.
 func hashLocalBinary(path string) (string, uint64, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return "", 0, fmt.Errorf("failed to read file: %w", err)
+		return "", 0, fmt.Errorf("failed to open file: %w", err)
 	}
+	defer f.Close()
 
-	// Calculate SHA256 hash
-	hashBytes := sha256.Sum256(data)
-	hash := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(hashBytes[:]))
+	hasher := sha256.New()
+	size, err := io.Copy(hasher, f)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to hash file: %w", err)
+	}
+	hash := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(hasher.Sum(nil)))
 
-	return hash, uint64(len(data)), nil
+	return hash, uint64(size), nil
 }
 
 // copyLocalBinary copies a local binary to a new location.
 func copyLocalBinary(src, dest string) error {
-	data, err := os.ReadFile(src)
+	srcFile, err := os.Open(src)
 	if err != nil {
-		return fmt.Errorf("failed to read source file: %w", err)
+		return fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer srcFile.Close()
+
+	destFile, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
 	}
 
-	if err := os.WriteFile(dest, data, 0755); err != nil {
-		return fmt.Errorf("failed to write destination file: %w", err)
+	if _, err := io.Copy(destFile, srcFile); err != nil {
+		destFile.Close()
+		return fmt.Errorf("failed to copy file: %w", err)
+	}
+	if err := destFile.Close(); err != nil {
+		return fmt.Errorf("failed to close destination file: %w", err)
 	}
 
 	return nil
@@ -336,18 +367,44 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 		Str("remote", remotePerfData).
 		Msg("Processing performance data on remote host")
 
-	scriptOutput, err := runPerfScriptToString(logger, func(w *os.File) error {
-		perfScriptCmd := fmt.Sprintf("perf script -i %s", remotePerfData)
-		if err := sshClient.Run(perfScriptCmd, ssh.WithStdOut(w)); err != nil {
-			return fmt.Errorf("failed to run perf script remotely: %w", err)
+	scriptFile, err := runPerfScriptToFile(logger, func(w *os.File) error {
+		perfScriptCmd := fmt.Sprintf("perf script -i %s", shellescape.Quote(remotePerfData))
+		counter := &byteCounter{}
+		var stderr bytes.Buffer
+		started := time.Now()
+		done := make(chan error, 1)
+		go func() {
+			done <- sshClient.Run(
+				perfScriptCmd,
+				ssh.WithStdOut(io.MultiWriter(w, counter)),
+				ssh.WithStdErr(&stderr),
+			)
+		}()
+
+		ticker := time.NewTicker(progressLogInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case err := <-done:
+				if err != nil {
+					return fmt.Errorf("failed to run perf script remotely: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+				}
+				logPerfScriptProgress(logger, counter.Load(), time.Since(started), "Remote perf script completed")
+				return nil
+			case <-ticker.C:
+				logPerfScriptProgress(logger, counter.Load(), time.Since(started), "Processing remote perf script")
+			}
 		}
-		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	defer cleanupPerfScriptFile(logger, scriptFile)
 
-	binaryPaths := extractBinaryPaths(scriptOutput)
+	binaryPaths, err := extractBinaryPaths(scriptFile)
+	if err != nil {
+		return nil, err
+	}
 	logger.Info().
 		Int("count", len(binaryPaths)).
 		Msg("Found binaries referenced in profile")
@@ -362,6 +419,7 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 		for _, remotePath := range binaryPaths {
 			// Skip special paths like [kernel.kallsyms], [vdso], etc.
 			if strings.HasPrefix(remotePath, "[") {
+				logger.Debug().Str("path", remotePath).Msg("Skipping special binary path")
 				continue
 			}
 
@@ -370,11 +428,21 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 			var foundPID string
 			for _, pid := range pids {
 				procPath := fmt.Sprintf("/proc/%s/root%s", pid, remotePath)
-				checkCmd := fmt.Sprintf("test -f %s && echo exists", procPath)
+				logger.Debug().
+					Str("remote", remotePath).
+					Str("pid", pid).
+					Str("proc_path", procPath).
+					Msg("Checking binary through process root")
+				checkCmd := fmt.Sprintf("test -f %s && echo exists", shellescape.Quote(procPath))
 				output, _, err := sshClient.RunCommand(checkCmd)
 				if err == nil && strings.TrimSpace(output) == "exists" {
 					foundProcPath = procPath
 					foundPID = pid
+					logger.Debug().
+						Str("remote", remotePath).
+						Str("pid", pid).
+						Str("proc_path", procPath).
+						Msg("Found binary through process root")
 					break
 				}
 			}
@@ -386,6 +454,10 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 				continue
 			}
 
+			logger.Debug().
+				Str("remote", remotePath).
+				Str("proc_path", foundProcPath).
+				Msg("Hashing remote binary")
 			hash, size, err := getRemoteBinaryHash(logger, sshClient, foundProcPath)
 			if err != nil {
 				logger.Warn().
@@ -397,13 +469,23 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 			}
 
 			binaryFilename, localPath := binaryArtifactPaths(runDir, remotePath, hash)
-			if err := copyBinaryFromRemote(logger, sshClient, foundProcPath, localPath, hash); err != nil {
-				logger.Warn().
-					Err(err).
+			cached := reuseCachedBinary(logger, runDir, binaryFilename, localPath, hash, size)
+			if !cached {
+				logger.Debug().
 					Str("remote", remotePath).
 					Str("proc_path", foundProcPath).
-					Msg("Failed to copy binary")
-				continue
+					Str("local", localPath).
+					Uint64("size_bytes", size).
+					Str("hash", hash).
+					Msg("Copying remote binary")
+				if err := copyBinaryFromRemote(logger, sshClient, foundProcPath, localPath, hash, size); err != nil {
+					logger.Warn().
+						Err(err).
+						Str("remote", remotePath).
+						Str("proc_path", foundProcPath).
+						Msg("Failed to copy binary")
+					continue
+				}
 			}
 
 			localBinaries[remotePath] = localPath
@@ -475,7 +557,10 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 			Msg("Archived extra binary")
 	}
 
-	if err := buildAndWriteProfile(logger, scriptOutput, localBinaries, outputPath, len(binaryArtifacts), historyID); err != nil {
+	if _, err := scriptFile.Seek(0, 0); err != nil {
+		return nil, fmt.Errorf("failed to rewind perf script output: %w", err)
+	}
+	if err := buildAndWriteProfile(logger, scriptFile, localBinaries, outputPath, len(binaryArtifacts), historyID); err != nil {
 		return nil, err
 	}
 
@@ -483,9 +568,9 @@ func ProcessPerfData(logger zerolog.Logger, sshClient *ssh.Client, remoteBaseDir
 }
 
 // extractBinaryPaths extracts unique binary paths from perf script output.
-func extractBinaryPaths(scriptOutput string) []string {
+func extractBinaryPaths(scriptOutput io.Reader) ([]string, error) {
 	binarySet := make(map[string]bool)
-	scanner := bufio.NewScanner(strings.NewReader(scriptOutput))
+	scanner := bufio.NewScanner(scriptOutput)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -509,14 +594,18 @@ func extractBinaryPaths(scriptOutput string) []string {
 	for path := range binarySet {
 		binaries = append(binaries, path)
 	}
-	return binaries
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read perf script output: %w", err)
+	}
+	return binaries, nil
 }
 
 // getRemoteBinaryHash calculates SHA256 hash of a remote binary.
 // Returns the hash as base32-encoded lowercase string and the file size.
 func getRemoteBinaryHash(logger zerolog.Logger, sshClient *ssh.Client, remotePath string) (string, uint64, error) {
 	// Get SHA256 hash from remote system
-	hashCmd := fmt.Sprintf("sha256sum %s | cut -d' ' -f1", remotePath)
+	quotedPath := shellescape.Quote(remotePath)
+	hashCmd := fmt.Sprintf("sha256sum %s | cut -d' ' -f1", quotedPath)
 	hashOutput, _, err := sshClient.RunCommand(hashCmd)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to get remote hash: %w", err)
@@ -540,7 +629,7 @@ func getRemoteBinaryHash(logger zerolog.Logger, sshClient *ssh.Client, remotePat
 	hashStr := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(hashBytes))
 
 	// Get file size
-	sizeCmd := fmt.Sprintf("stat -c%%s %s 2>/dev/null || stat -f%%z %s", remotePath, remotePath)
+	sizeCmd := fmt.Sprintf("stat -c%%s %s 2>/dev/null || stat -f%%z %s", quotedPath, quotedPath)
 	sizeOutput, _, err := sshClient.RunCommand(sizeCmd)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to get file size: %w", err)
@@ -551,37 +640,187 @@ func getRemoteBinaryHash(logger zerolog.Logger, sshClient *ssh.Client, remotePat
 		return "", 0, fmt.Errorf("failed to parse file size: %w", err)
 	}
 
+	logger.Debug().
+		Str("remote", remotePath).
+		Uint64("size_bytes", size).
+		Str("hash", hashStr).
+		Msg("Hashed remote binary")
+
 	return hashStr, size, nil
 }
 
+type remoteBinaryCopier interface {
+	CopyFromRemote(remotePath string, dst io.Writer) error
+}
+
+type byteCounter struct {
+	bytes atomic.Uint64
+}
+
+func (c *byteCounter) Write(data []byte) (int, error) {
+	c.bytes.Add(uint64(len(data)))
+	return len(data), nil
+}
+
+func (c *byteCounter) Load() uint64 {
+	return c.bytes.Load()
+}
+
+func formatBytes(size uint64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+
+	value := float64(size)
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	for _, suffix := range units {
+		value /= unit
+		if value < unit || suffix == units[len(units)-1] {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%d B", size)
+}
+
+func formatTransferRate(size uint64, elapsed time.Duration) string {
+	if elapsed <= 0 {
+		return "0 B/s"
+	}
+	return formatBytes(uint64(float64(size)/elapsed.Seconds())) + "/s"
+}
+
+func logPerfScriptProgress(logger zerolog.Logger, outputBytes uint64, elapsed time.Duration, message string) {
+	logger.Info().
+		Str("output", formatBytes(outputBytes)).
+		Str("rate", formatTransferRate(outputBytes, elapsed)).
+		Dur("elapsed", elapsed).
+		Msg(message)
+}
+
+func logBinaryTransferProgress(logger zerolog.Logger, remotePath string, transferred, expected uint64, elapsed time.Duration, message string) {
+	event := logger.Info().
+		Str("remote", remotePath).
+		Str("downloaded", formatBytes(transferred)).
+		Str("total", formatBytes(expected)).
+		Str("rate", formatTransferRate(transferred, elapsed)).
+		Dur("elapsed", elapsed)
+	if expected > 0 {
+		event.Str("progress", fmt.Sprintf("%.1f%%", float64(transferred)*100/float64(expected)))
+	}
+	event.Msg(message)
+}
+
+// reuseCachedBinary links or copies a verified binary from an earlier history run.
+func reuseCachedBinary(logger zerolog.Logger, runDir, binaryFilename, localPath, expectedHash string, expectedSize uint64) bool {
+	historyDir := filepath.Dir(runDir)
+	entries, err := os.ReadDir(historyDir)
+	if err != nil {
+		logger.Debug().Err(err).Str("path", historyDir).Msg("Failed to search binary cache")
+		return false
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == filepath.Base(runDir) {
+			continue
+		}
+		candidate := filepath.Join(historyDir, entry.Name(), binaryFilename)
+		info, err := os.Stat(candidate)
+		if err != nil || uint64(info.Size()) != expectedSize {
+			continue
+		}
+
+		hash, _, err := hashLocalBinary(candidate)
+		if err != nil || hash != expectedHash {
+			logger.Debug().
+				Err(err).
+				Str("candidate", candidate).
+				Msg("Ignoring invalid cached binary")
+			continue
+		}
+
+		if err := os.Link(candidate, localPath); err != nil {
+			if err := copyLocalBinary(candidate, localPath); err != nil {
+				logger.Debug().Err(err).Str("candidate", candidate).Msg("Failed to reuse cached binary")
+				continue
+			}
+		}
+
+		logger.Debug().
+			Str("candidate", candidate).
+			Str("local", localPath).
+			Str("hash", expectedHash).
+			Uint64("size_bytes", expectedSize).
+			Msg("Reused cached binary")
+		return true
+	}
+
+	return false
+}
+
 // copyBinaryFromRemote copies a binary from the remote host to local filesystem and verifies the hash.
-func copyBinaryFromRemote(logger zerolog.Logger, sshClient *ssh.Client, remotePath, localPath, expectedHash string) error {
-	// Use base64 encoding to transfer the binary
-	// This avoids issues with binary data in SSH output
-	cmd := fmt.Sprintf("base64 %s", remotePath)
-	base64Output, _, err := sshClient.RunCommand(cmd)
+func copyBinaryFromRemote(logger zerolog.Logger, sshClient remoteBinaryCopier, remotePath, localPath, expectedHash string, expectedSize uint64) error {
+	tempFile, err := os.CreateTemp(filepath.Dir(localPath), "."+filepath.Base(localPath)+".tmp-*")
 	if err != nil {
-		return fmt.Errorf("failed to read remote binary: %w", err)
+		return fmt.Errorf("failed to create temporary binary file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+
+	logger.Debug().
+		Str("remote", remotePath).
+		Str("local", localPath).
+		Uint64("size_bytes", expectedSize).
+		Msg("Streaming remote binary")
+
+	hasher := sha256.New()
+	counter := &byteCounter{}
+	started := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		done <- sshClient.CopyFromRemote(remotePath, io.MultiWriter(tempFile, hasher, counter))
+	}()
+
+	ticker := time.NewTicker(progressLogInterval)
+	defer ticker.Stop()
+
+download:
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				tempFile.Close()
+				return fmt.Errorf("failed to read remote binary: %w", err)
+			}
+			logBinaryTransferProgress(logger, remotePath, counter.Load(), expectedSize, time.Since(started), "Downloaded remote binary")
+			break download
+		case <-ticker.C:
+			logBinaryTransferProgress(logger, remotePath, counter.Load(), expectedSize, time.Since(started), "Downloading remote binary")
+		}
 	}
 
-	// Decode base64
-	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(base64Output))
-	if err != nil {
-		return fmt.Errorf("failed to decode base64: %w", err)
+	transferred := counter.Load()
+	if transferred != expectedSize {
+		tempFile.Close()
+		return fmt.Errorf("size mismatch: expected %d bytes, got %d", expectedSize, transferred)
 	}
 
-	// Calculate local hash for verification
-	localHashBytes := sha256.Sum256(data)
-	localHash := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(localHashBytes[:]))
+	localHash := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(hasher.Sum(nil)))
 
-	// Verify hash matches
 	if localHash != expectedHash {
+		tempFile.Close()
 		return fmt.Errorf("hash mismatch: expected %s, got %s", expectedHash, localHash)
 	}
 
-	// Write to local file
-	if err := os.WriteFile(localPath, data, 0755); err != nil {
-		return fmt.Errorf("failed to write local binary: %w", err)
+	if err := tempFile.Chmod(0755); err != nil {
+		tempFile.Close()
+		return fmt.Errorf("failed to make local binary executable: %w", err)
+	}
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("failed to close local binary: %w", err)
+	}
+	if err := os.Rename(tempPath, localPath); err != nil {
+		return fmt.Errorf("failed to install local binary: %w", err)
 	}
 
 	logger.Debug().
