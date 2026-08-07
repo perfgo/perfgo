@@ -1,12 +1,29 @@
 package perfscript
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/google/pprof/profile"
 	"github.com/stretchr/testify/require"
 )
+
+func BenchmarkParserManyUniqueStacks(b *testing.B) {
+	var output strings.Builder
+	for i := 0; i < 10_000; i++ {
+		fmt.Fprintf(&output, "program 12345 [000] 123.456789: 1 cycles:u:\n\t%x function_%d+0x1 (/path/to/binary)\n\n", 0x1000+i, i)
+	}
+	script := output.String()
+
+	b.ResetTimer()
+	for b.Loop() {
+		parser := New()
+		if _, err := parser.Parse(strings.NewReader(script)); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
 
 func TestParser_Parse(t *testing.T) {
 	// Example perf script output
