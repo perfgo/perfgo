@@ -352,9 +352,9 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 	remoteHost := ctx.String("remote-host")
 	keepArtifacts := ctx.Bool("keep")
 
-	var perfEvent string
+	var profileEvents []string
 	var perfCount int
-	var perfEvents []string
+	var statEvents []string
 	var perfDetail bool
 	var c2cEvent string
 	var c2cCount int
@@ -362,10 +362,10 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 	var c2cShowAll bool
 
 	if perfMode == "profile" {
-		perfEvent = ctx.String("event")
+		profileEvents = ctx.StringSlice("event")
 		perfCount = ctx.Int("count")
 	} else if perfMode == "stat" {
-		perfEvents = ctx.StringSlice("event")
+		statEvents = ctx.StringSlice("event")
 		perfDetail = ctx.Bool("detail")
 	} else if perfMode == "c2c" {
 		// Use default values for c2c
@@ -574,15 +574,15 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 
 		if perfMode == "profile" {
 			recordOpts := &perf.RecordOptions{
-				Event: perfEvent,
-				Count: perfCount,
+				Events: profileEvents,
+				Count:  perfCount,
 			}
 
 			// Store perf options in history
 			history.Perf = &model.Perf{
 				Record: &model.PerfRecord{
-					Event: perfEvent,
-					Count: perfCount,
+					Events: profileEvents,
+					Count:  perfCount,
 				},
 			}
 
@@ -614,8 +614,8 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 			// Profile is written directly to history directory
 		} else if perfMode == "stat" {
 			var events []string
-			if len(perfEvents) > 0 {
-				events = perfEvents
+			if len(statEvents) > 0 {
+				events = statEvents
 			}
 			statOpts := perf.StatOptions{
 				Events: events,
@@ -716,15 +716,15 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 
 		if perfMode == "profile" {
 			recordOpts := &perf.RecordOptions{
-				Event: perfEvent,
-				Count: perfCount,
+				Events: profileEvents,
+				Count:  perfCount,
 			}
 
 			// Store perf options in history
 			history.Perf = &model.Perf{
 				Record: &model.PerfRecord{
-					Event: perfEvent,
-					Count: perfCount,
+					Events: profileEvents,
+					Count:  perfCount,
 				},
 			}
 
@@ -756,8 +756,8 @@ func (a *App) runTest(ctx *cli.Context, perfMode string) error {
 			// Profile is written directly to history directory
 		} else if perfMode == "stat" {
 			var events []string
-			if len(perfEvents) > 0 {
-				events = perfEvents
+			if len(statEvents) > 0 {
+				events = statEvents
 			}
 			statOpts := perf.StatOptions{
 				Events: events,

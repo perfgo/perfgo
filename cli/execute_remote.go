@@ -162,8 +162,8 @@ func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePat
 		Str("package", packagePath).
 		Strs("args", args)
 
-	if recordOpts != nil && recordOpts.Event != "" {
-		logMsg.Str("perfEvent", recordOpts.Event)
+	if recordOpts != nil && len(recordOpts.Events) > 0 {
+		logMsg.Strs("perfEvents", recordOpts.Events)
 		if recordOpts.Count > 0 {
 			logMsg.Int("perfCount", recordOpts.Count)
 		}
@@ -184,8 +184,8 @@ func (a *App) executeRemoteTestInDirWithOptions(sshClient *ssh.Client, remotePat
 
 		logEvent := a.logger.Info().
 			Str("output", perfDataPath)
-		if recordOpts.Event != "" {
-			logEvent.Str("event", recordOpts.Event)
+		if len(recordOpts.Events) > 0 {
+			logEvent.Strs("events", recordOpts.Events)
 			if recordOpts.Count > 0 {
 				logEvent.Int("count", recordOpts.Count)
 			}

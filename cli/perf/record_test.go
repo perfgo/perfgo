@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"errors"
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,12 +15,62 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/urfave/cli/v2"
 )
 
 type fakeRemoteBinaryCopier struct {
 	data  []byte
 	err   error
 	calls int
+}
+
+func TestProfileEventFlagAcceptsMultipleEvents(t *testing.T) {
+	set := flag.NewFlagSet("profile", flag.ContinueOnError)
+	require.NoError(t, ProfileEventFlag().Apply(set))
+	require.NoError(t, set.Parse([]string{
+		"--event", "cycles",
+		"--event", "instructions",
+		"--event", "l2_rqsts.all_demand_references",
+		"--event", "l2_rqsts.demand_data_rd_miss",
+	}))
+
+	ctx := cli.NewContext(nil, set, nil)
+	assert.Equal(t, []string{
+		"cycles",
+		"instructions",
+		"l2_rqsts.all_demand_references",
+		"l2_rqsts.demand_data_rd_miss",
+	}, ctx.StringSlice("event"))
+}
+
+func TestBuildRecordArgsMultipleEvents(t *testing.T) {
+	opts := RecordOptions{
+		Events: []string{
+			"cycles",
+			"instructions",
+			"l2_rqsts.all_demand_references",
+			"l2_rqsts.demand_data_rd_miss",
+		},
+		Count:      1000,
+		OutputPath: "/tmp/perf.data",
+		Binary:     "/tmp/perfgo.test",
+		Args:       []string{"-test.bench=BenchmarkCounters"},
+	}
+
+	assert.Equal(t, []string{
+		"record", "-g", "--call-graph", "fp",
+		"-e", "cycles",
+		"-e", "instructions",
+		"-e", "l2_rqsts.all_demand_references",
+		"-e", "l2_rqsts.demand_data_rd_miss",
+		"-c", "1000",
+		"-o", "/tmp/perf.data",
+		"--", "/tmp/perfgo.test", "-test.bench=BenchmarkCounters",
+	}, BuildRecordArgs(opts))
+	assert.Equal(t,
+		"perf record -g --call-graph fp -e cycles -e instructions -e l2_rqsts.all_demand_references -e l2_rqsts.demand_data_rd_miss -c 1000 -o /tmp/perf.data -- /tmp/perfgo.test -test.bench\x3dBenchmarkCounters",
+		BuildRecordCommand(opts),
+	)
 }
 
 func (f *fakeRemoteBinaryCopier) CopyFromRemote(_ string, dst io.Writer) error {

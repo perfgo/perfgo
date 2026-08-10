@@ -213,6 +213,38 @@ program 12345 [000] 123.456791: 75 cycles:u:
 	require.Equal(t, int64(50), sample.Value[instructionsIdx], "instructions:u should be correct")
 }
 
+func TestParser_ParseMultipleHardwareEvents(t *testing.T) {
+	output := `program 12345 [000] 123.456789: 100 cycles:
+	ffffffffa1234567 function_a+0x10 (/path/to/binary)
+
+program 12345 [000] 123.456790: 50 instructions:
+	ffffffffa1234567 function_a+0x10 (/path/to/binary)
+
+program 12345 [000] 123.456791: 25 l2_rqsts.all_demand_references:
+	ffffffffa1234567 function_a+0x10 (/path/to/binary)
+
+program 12345 [000] 123.456792: 5 l2_rqsts.demand_data_rd_miss:
+	ffffffffa1234567 function_a+0x10 (/path/to/binary)
+`
+
+	prof, err := New().Parse(strings.NewReader(output))
+	require.NoError(t, err)
+	require.NoError(t, prof.CheckValid())
+	require.Len(t, prof.Sample, 1)
+	require.Equal(t, []string{
+		"cycles",
+		"instructions",
+		"l2_rqsts.all_demand_references",
+		"l2_rqsts.demand_data_rd_miss",
+	}, []string{
+		prof.SampleType[0].Type,
+		prof.SampleType[1].Type,
+		prof.SampleType[2].Type,
+		prof.SampleType[3].Type,
+	})
+	require.Equal(t, []int64{100, 50, 25, 5}, prof.Sample[0].Value)
+}
+
 func TestParser_PreserveFullPaths(t *testing.T) {
 	// Test that full binary paths are preserved for pprof symbolization
 	output := `program 12345 [000] 123.456789:          1 cycles:u:

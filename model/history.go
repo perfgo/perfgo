@@ -73,8 +73,10 @@ type Perf struct {
 
 // PerfRecord contains perf record options that were used
 type PerfRecord struct {
-	// Event to record (e.g., "cycles", "instructions")
+	// Event is retained for reading history written before multiple events were supported.
 	Event string `json:"event,omitempty"`
+	// Events to record (e.g., "cycles", "instructions")
+	Events []string `json:"events,omitempty"`
 	// Event period to sample
 	Count int `json:"count,omitempty"`
 	// Process IDs that were profiled
